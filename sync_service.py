@@ -1,0 +1,113 @@
+"""
+sync_service.py — Orchestration layer for queue management and SSE streaming.
+
+Coordinates config_manager (data access) and youtube_api (API calls) to
+build and cache the video queue.  This is the module that app.py routes call.
+"""
+
+import json
+import logging
+import concurrent.futures
+import requests
+
+import config_manager as cfg
+import youtube_api
+
+logger = logging.getLogger(__name__)
+
+
+# ── Queue (non-streaming) ──────────────────────────────────────────────────
+
+def get_queue(force_sync=False):
+    """Return the cached queue, or fetch fresh if expired / forced."""
+    if not force_sync and cfg.is_cache_valid():
+        return cfg.load_cache()
+    return _fetch_all_videos()
+
+
+def _fetch_all_videos():
+    """Sequentially fetch all channels and return a sorted video list."""
+    _config, api_key, start_date, raw_channels = cfg.get_sync_params()
+    if not api_key:
+        return []
+
+    all_videos = []
+    for ch in raw_channels:
+        channel_id = cfg.normalize_channel_id(ch)
+        playlist_id = youtube_api.get_uploads_playlist_id(channel_id, api_key)
+        if playlist_id:
+            all_videos.extend(youtube_api.fetch_videos_from_playlist(playlist_id, start_date, api_key))
+
+    youtube_api.sort_videos_newest_first(all_videos)
+    cfg.save_cache(all_videos)
+    return all_videos
+
+
+# ── Queue (SSE streaming) ──────────────────────────────────────────────────
+
+def _sse_event(data_dict):
+    """Format a dict as a Server-Sent Event data line."""
+    return f"data: {json.dumps(data_dict)}\n\n"
+
+
+def get_queue_stream(force_sync=False):
+    """
+    Generator that yields SSE events.  Uses cache if valid, otherwise
+    fetches in parallel and streams progress events.
+    """
+    if not force_sync and cfg.is_cache_valid():
+        videos = cfg.load_cache()
+        yield _sse_event({'type': 'videos', 'videos': videos})
+        yield _sse_event({'type': 'done', 'message': 'Loaded from cache'})
+        return
+
+    yield from _fetch_all_videos_stream()
+
+
+def _fetch_all_videos_stream():
+    """Parallel-fetch all channels, yielding SSE progress events."""
+    config, api_key, start_date, raw_channels_list = cfg.get_sync_params()
+
+    if not config:
+        yield _sse_event({'type': 'error', 'message': 'No config'})
+        return
+    if not api_key:
+        yield _sse_event({'type': 'error', 'message': 'No API Key'})
+        return
+
+    channels = cfg.deduplicate_channels(raw_channels_list)
+    if not channels:
+        yield _sse_event({'type': 'done', 'message': 'No channels configured'})
+        return
+
+    all_videos = []
+
+    def _process_channel(channel, session):
+        ch_id = cfg.normalize_channel_id(channel)
+        ch_name = cfg.normalize_channel_name(channel)
+        playlist_id = youtube_api.get_uploads_playlist_id(ch_id, api_key, session=session)
+        videos = []
+        if playlist_id:
+            videos = youtube_api.fetch_videos_from_playlist(playlist_id, start_date, api_key, session=session)
+        return ch_name, videos
+
+    yield _sse_event({'type': 'progress', 'message': f'Syncing {len(channels)} channels in parallel ...'})
+
+    # Session provides HTTP connection pooling across threads
+    with requests.Session() as session:
+        max_workers = min(cfg.MAX_PARALLEL_CHANNELS, len(channels))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_process_channel, ch, session): ch for ch in channels}
+            for future in concurrent.futures.as_completed(futures):
+                try:
+                    ch_name, videos = future.result()
+                    if videos:
+                        all_videos.extend(videos)
+                        yield _sse_event({'type': 'progress', 'message': f'Finished {ch_name} ...'})
+                        yield _sse_event({'type': 'videos', 'videos': videos})
+                except Exception as exc:
+                    logger.exception("Channel sync failed: %s", exc)
+
+    youtube_api.sort_videos_newest_first(all_videos)
+    cfg.save_cache(all_videos)
+    yield _sse_event({'type': 'done', 'message': 'Sync complete!'})

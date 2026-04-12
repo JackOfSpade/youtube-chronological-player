@@ -1,0 +1,135 @@
+/**
+ * settings.js — Settings modal: channel management and search autocomplete.
+ */
+
+import { DOM, state, escapeHTML, showNotification } from './state.js';
+import { loadQueueData } from './queue.js';
+
+// ── Public API ─────────────────────────────────────────────────────────────
+
+export function openSettingsModal() {
+    DOM.settingsModal.classList.remove('hidden');
+    _fetchChannelConfig();
+}
+
+export function closeSettingsModal() {
+    DOM.settingsModal.classList.add('hidden');
+}
+
+export function handleAddChannel() {
+    const val = DOM.channelInput.value.trim();
+    if (val && !state.settingsChannels.some(c => c.id === val)) {
+        state.settingsChannels.push({ id: val, name: val });
+        DOM.channelInput.value = '';
+        _renderChannels();
+    }
+}
+
+export function handleSearchInput(e) {
+    const q = e.target.value.trim();
+    if (!q) { DOM.searchDropdown.classList.add('hidden'); return; }
+    if (state.searchTimeout) clearTimeout(state.searchTimeout);
+    state.searchTimeout = setTimeout(() => _search(q), 800);
+}
+
+export async function saveChannels() {
+    DOM.saveChannelsBtn.textContent = 'Saving...';
+    try {
+        await fetch('/api/channels', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ channels: state.settingsChannels }),
+        });
+        closeSettingsModal();
+        loadQueueData(true);
+    } catch (e) {
+        console.error(e);
+        showNotification('Failed to save channels');
+    } finally {
+        DOM.saveChannelsBtn.textContent = 'Save & Sync';
+    }
+}
+
+// ── Private ────────────────────────────────────────────────────────────────
+
+async function _fetchChannelConfig() {
+    try {
+        const res = await fetch('/api/config');
+        const data = await res.json();
+        const raw = data.channels || [];
+        state.settingsChannels = raw.map(c => typeof c === 'string' ? { id: c, name: c } : c);
+        _renderChannels();
+    } catch (e) {
+        console.error(e);
+    }
+}
+
+function _renderChannels() {
+    DOM.channelList.innerHTML = '';
+    if (state.settingsChannels.length === 0) {
+        DOM.channelList.innerHTML = '<div class="queue-empty">No channels added.</div>';
+        return;
+    }
+
+    const frag = document.createDocumentFragment();
+    state.settingsChannels.forEach((ch, idx) => {
+        const div = document.createElement('div');
+        div.className = 'channel-item';
+        div.innerHTML = `
+            <span>${escapeHTML(ch.name || ch.id)}</span>
+            <button class="remove-btn" data-index="${idx}">Remove</button>
+        `;
+        frag.appendChild(div);
+    });
+    DOM.channelList.appendChild(frag);
+
+    // Event delegation
+    DOM.channelList.onclick = (e) => {
+        const btn = e.target.closest('.remove-btn');
+        if (!btn) return;
+        state.settingsChannels.splice(parseInt(btn.dataset.index, 10), 1);
+        _renderChannels();
+    };
+}
+
+async function _search(query) {
+    DOM.searchDropdown.innerHTML = '<div class="search-status">Searching...</div>';
+    DOM.searchDropdown.classList.remove('hidden');
+
+    try {
+        const res = await fetch(`/api/search_channels?q=${encodeURIComponent(query)}`);
+        const results = await res.json();
+
+        const existing = new Set(state.settingsChannels.map(c => c.id));
+        const filtered = results.filter(ch => !existing.has(ch.channelId));
+
+        DOM.searchDropdown.innerHTML = '';
+        if (filtered.length === 0) {
+            DOM.searchDropdown.innerHTML = '<div class="search-status">No results found</div>';
+            return;
+        }
+
+        const frag = document.createDocumentFragment();
+        filtered.forEach(ch => {
+            const item = document.createElement('div');
+            item.className = 'search-result-item';
+            item.innerHTML = `
+                <img src="${escapeHTML(ch.thumbnail)}" class="search-result-thumb" loading="lazy" />
+                <span class="search-result-title">${escapeHTML(ch.title)}</span>
+            `;
+            item.addEventListener('click', () => {
+                if (!state.settingsChannels.some(c => c.id === ch.channelId)) {
+                    state.settingsChannels.push({ id: ch.channelId, name: ch.title });
+                    _renderChannels();
+                }
+                DOM.channelInput.value = '';
+                DOM.searchDropdown.classList.add('hidden');
+            });
+            frag.appendChild(item);
+        });
+        DOM.searchDropdown.appendChild(frag);
+    } catch (e) {
+        console.error('Search failed', e);
+        DOM.searchDropdown.innerHTML = '<div class="search-status search-error">Search failed</div>';
+    }
+}

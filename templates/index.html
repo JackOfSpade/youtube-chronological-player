@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="A chronological YouTube video aggregator that collects videos from your favourite channels and plays them in order.">
+    <title>Chronological YouTube Player</title>
+    <!-- Google Fonts: Inter -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Custom Styles -->
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div id="app-container">
+        <!-- Error / Notification banner -->
+        <div id="notification-banner" class="hidden"></div>
+        
+        <div id="main-layout">
+            <!-- Left panel: Video Queue -->
+            <aside id="queue-panel">
+                <header class="queue-header">
+                    <h2>Up Next</h2>
+                    <div class="queue-controls">
+                        <button id="resume-btn" class="glass-btn pulse hidden">Resume</button>
+                        <button id="settings-btn" class="glass-btn">⚙️ Channels</button>
+                        <button id="sync-btn" class="glass-btn">Sync</button>
+                    </div>
+                </header>
+                <div id="queue-list" class="queue-list">
+                    <!-- Video items injected via JS -->
+                    <div class="skeleton-item"></div>
+                    <div class="skeleton-item"></div>
+                    <div class="skeleton-item"></div>
+                </div>
+                <footer class="queue-footer">
+                    <button id="prev-page-btn" class="glass-btn hidden">Prev</button>
+                    <span id="page-indicator">Page 1</span>
+                    <button id="next-page-btn" class="glass-btn hidden">Next</button>
+                </footer>
+            </aside>
+            
+            <!-- Right panel: Player -->
+            <main id="player-panel">
+                <div class="player-container glass-panel">
+                    <div id="player-placeholder">
+                        <div class="player-empty-state">
+                            <span class="icon">▶</span>
+                            <h3>Select a video to start</h3>
+                        </div>
+                    </div>
+                    <div id="yt-player"></div>
+                </div>
+                
+                <div id="current-video-info" class="hidden glass-panel">
+                    <h1 id="current-title"></h1>
+                    <div class="meta-row">
+                        <span id="current-channel" class="channel-badge"></span>
+                        <span id="current-date" class="date-badge"></span>
+                        <a id="comment-on-youtube-btn" href="#" target="_blank" class="glass-btn pulse comment-yt-btn">💬 Comment on YouTube</a>
+                    </div>
+                </div>
+
+                <div id="comments-section" class="hidden glass-panel comments-panel">
+                    <h3 class="comments-heading">Comments</h3>
+                    <div id="comments-container">
+                        <div class="comments-status">Loading comments...</div>
+                    </div>
+                </div>
+            </main>
+        </div>
+    </div>
+
+    <!-- Modal Overlay -->
+    <div id="settings-modal" class="modal-overlay hidden">
+        <div class="modal-content glass-panel">
+            <div class="modal-header">
+                <h2>Manage Channels</h2>
+                <button id="close-modal-btn" class="icon-btn">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="add-channel-form">
+                    <input type="text" id="new-channel-id" placeholder="Paste Channel ID or Search by Name..." autocomplete="off" />
+                    <button id="add-channel-btn" class="glass-btn">Add</button>
+                    <!-- Search Autocomplete Dropdown -->
+                    <div id="search-dropdown" class="search-dropdown hidden"></div>
+                </div>
+                <div id="channel-list-container" class="channel-list">
+                    <!-- Dynamic channel list injected here -->
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="save-channels-btn" class="glass-btn pulse save-btn">Save &amp; Sync</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- YouTube IFrame API -->
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <!-- App Script (ES module) -->
+    <script type="module" src="/static/js/app.js"></script>
+</body>
+</html>
