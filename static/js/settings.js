@@ -2,8 +2,8 @@
  * settings.js — Settings modal: channel management and search autocomplete.
  */
 
-import { DOM, state, escapeHTML, showNotification } from './state.js';
-import { loadQueueData } from './queue.js';
+import { DOM, state, escapeHTML, showNotification, rebuildQueueIndex, findOldestUnwatchedIndex } from './state.js';
+import { loadQueueData, renderQueue, updateResumeButton } from './queue.js';
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -88,8 +88,25 @@ function _renderChannels() {
 DOM.channelList.addEventListener('click', (e) => {
     const btn = e.target.closest('.remove-btn');
     if (!btn) return;
-    state.settingsChannels.splice(parseInt(btn.dataset.index, 10), 1);
+    const index = parseInt(btn.dataset.index, 10);
+    const removedId = state.settingsChannels[index].id;
+    state.settingsChannels.splice(index, 1);
     _renderChannels();
+
+    // Instantly remove videos from the queue
+    state.queue = state.queue.filter(v => v.channelId !== removedId);
+    rebuildQueueIndex();
+
+    // Recalculate oldest unwatched video for pagination
+    const oldest = findOldestUnwatchedIndex();
+    if (oldest !== -1) {
+        state.currentPage = Math.floor(oldest / state.pageSize) + 1;
+    } else {
+        const total = Math.ceil(state.queue.length / state.pageSize);
+        if (state.currentPage > total && total > 0) state.currentPage = total;
+    }
+    renderQueue();
+    updateResumeButton();
 });
 
 async function _search(query) {
