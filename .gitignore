@@ -2,3 +2,5 @@
 /config.yaml
 /data
 /venv
+.env
+service-account.json

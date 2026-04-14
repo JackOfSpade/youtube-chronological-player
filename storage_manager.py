@@ -14,11 +14,9 @@ import config_manager as cfg
 HISTORY_FILE = 'data/history.json'
 _history_lock = threading.Lock()
 
-_DEFAULT_HISTORY = {"watched_video_ids": [], "last_watched_video_id": None}
-
 
 def _make_default():
-    return dict(_DEFAULT_HISTORY, watched_video_ids=[])
+    return {"watched_video_ids": [], "last_watched_video_id": None}
 
 
 # ── Public API ──────────────────────────────────────────────────────────────

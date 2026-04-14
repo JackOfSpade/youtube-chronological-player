@@ -100,6 +100,35 @@ export function escapeHTML(str) {
     return _escapeEl.innerHTML;
 }
 
+/**
+ * Sanitize HTML by stripping dangerous tags and event-handler attributes
+ * while preserving safe formatting tags used by YouTube (b, i, a, br, etc.).
+ */
+const _ALLOWED_TAGS = new Set(['b', 'i', 'em', 'strong', 'a', 'br', 'p', 'ul', 'ol', 'li', 'span']);
+const _sanitizeDiv = document.createElement('div');
+
+export function sanitizeHTML(html) {
+    _sanitizeDiv.innerHTML = html;
+    // Remove dangerous elements
+    for (const el of _sanitizeDiv.querySelectorAll('script, iframe, object, embed, form, style, link, meta, base')) {
+        el.remove();
+    }
+    // Strip event-handler attributes and srcdoc from all remaining elements
+    for (const el of _sanitizeDiv.querySelectorAll('*')) {
+        for (const attr of [...el.attributes]) {
+            if (attr.name.startsWith('on') || attr.name === 'srcdoc') {
+                el.removeAttribute(attr.name);
+            }
+        }
+        // Force links to open in new tab and prevent tabnapping
+        if (el.tagName === 'A') {
+            el.setAttribute('target', '_blank');
+            el.setAttribute('rel', 'noopener noreferrer');
+        }
+    }
+    return _sanitizeDiv.innerHTML;
+}
+
 const _dateOpts = { month: 'short', day: 'numeric', year: 'numeric' };
 
 /** Format an ISO date string into a short locale string. */

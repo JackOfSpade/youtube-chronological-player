@@ -5,6 +5,7 @@ Every function here takes an api_key (and optionally a requests.Session)
 and returns parsed data.  No config loading, no caching, no orchestration.
 """
 
+import datetime
 import logging
 import requests
 from dateutil import parser as dateutil_parser
@@ -74,7 +75,6 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
     next_page_token = ""
     start_dt = dateutil_parser.parse(start_date_iso)
     if start_dt.tzinfo is None:
-        import datetime
         start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
 
     while True:

@@ -12,6 +12,7 @@ import requests
 
 import config_manager as cfg
 import youtube_api
+import ai_filter
 
 logger = logging.getLogger(__name__)
 
@@ -22,25 +23,15 @@ def get_queue(force_sync=False):
     """Return the cached queue, or fetch fresh if expired / forced."""
     if not force_sync and cfg.is_cache_valid():
         return cfg.load_cache()
-    return _fetch_all_videos()
 
-
-def _fetch_all_videos():
-    """Sequentially fetch all channels and return a sorted video list."""
-    _config, api_key, start_date, raw_channels = cfg.get_sync_params()
-    if not api_key:
-        return []
-
-    all_videos = []
-    for ch in raw_channels:
-        channel_id = cfg.normalize_channel_id(ch)
-        playlist_id = youtube_api.get_uploads_playlist_id(channel_id, api_key)
-        if playlist_id:
-            all_videos.extend(youtube_api.fetch_videos_from_playlist(playlist_id, start_date, api_key))
-
-    youtube_api.sort_videos_newest_first(all_videos)
-    cfg.save_cache(all_videos)
-    return all_videos
+    # Consume the streaming generator to get the final video list.
+    # This reuses the same parallel-fetch, dedup, and AI-filter pipeline.
+    videos = []
+    for event_str in _fetch_all_videos_stream():
+        data = json.loads(event_str.removeprefix("data: ").strip())
+        if data.get('type') == 'videos':
+            videos = data['videos']
+    return videos
 
 
 # ── Queue (SSE streaming) ──────────────────────────────────────────────────
@@ -104,10 +95,14 @@ def _fetch_all_videos_stream():
                     if videos:
                         all_videos.extend(videos)
                         yield _sse_event({'type': 'progress', 'message': f'Finished {ch_name} ...'})
-                        yield _sse_event({'type': 'videos', 'videos': videos})
                 except Exception as exc:
                     logger.exception("Channel sync failed: %s", exc)
 
     youtube_api.sort_videos_newest_first(all_videos)
-    cfg.save_cache(all_videos)
+
+    yield _sse_event({'type': 'progress', 'message': 'Analyzing videos with AI ...'})
+    filtered_videos = ai_filter.filter_videos(all_videos)
+
+    cfg.save_cache(filtered_videos)
+    yield _sse_event({'type': 'videos', 'videos': filtered_videos})
     yield _sse_event({'type': 'done', 'message': 'Sync complete!'})

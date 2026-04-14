@@ -82,15 +82,15 @@ function _renderChannels() {
         frag.appendChild(div);
     });
     DOM.channelList.appendChild(frag);
-
-    // Event delegation
-    DOM.channelList.onclick = (e) => {
-        const btn = e.target.closest('.remove-btn');
-        if (!btn) return;
-        state.settingsChannels.splice(parseInt(btn.dataset.index, 10), 1);
-        _renderChannels();
-    };
 }
+
+// Event delegation — set up once, works with dynamically rendered content
+DOM.channelList.addEventListener('click', (e) => {
+    const btn = e.target.closest('.remove-btn');
+    if (!btn) return;
+    state.settingsChannels.splice(parseInt(btn.dataset.index, 10), 1);
+    _renderChannels();
+});
 
 async function _search(query) {
     DOM.searchDropdown.innerHTML = '<div class="search-status">Searching...</div>';

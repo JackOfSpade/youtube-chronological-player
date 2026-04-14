@@ -2,7 +2,7 @@
  * comments.js — Comment loading and rendering.
  */
 
-import { DOM, state, escapeHTML, formatDate } from './state.js';
+import { DOM, state, escapeHTML, formatDate, sanitizeHTML } from './state.js';
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
@@ -81,7 +81,7 @@ function _renderComments(comments, videoId, append) {
                             <strong>${escapeHTML(r.author)}</strong>
                             <span class="comment-meta">${formatDate(r.publishedAt)}</span>
                         </div>
-                        <div class="comment-text">${r.text}</div>
+                        <div class="comment-text">${sanitizeHTML(r.text)}</div>
                         <div class="comment-actions">
                             <span class="comment-meta">👍 ${r.likeCount}</span>
                             <a href="https://www.youtube.com/watch?v=${videoId}&lc=${r.id}#comments" target="_blank" class="comment-reply-link">Reply</a>
@@ -104,7 +104,7 @@ function _renderComments(comments, videoId, append) {
                         <strong>${escapeHTML(c.author)}</strong>
                         <span class="comment-meta">${formatDate(c.publishedAt)}</span>
                     </div>
-                    <div class="comment-text">${c.text}</div>
+                    <div class="comment-text">${sanitizeHTML(c.text)}</div>
                     <div class="comment-actions">
                         <span class="comment-meta">👍 ${c.likeCount}</span>
                         <a href="https://www.youtube.com/watch?v=${videoId}&lc=${c.id}#comments" target="_blank" class="comment-reply-link">Reply</a>

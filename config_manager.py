@@ -112,8 +112,8 @@ def is_cache_valid():
     """True if the cache file exists and was written within CACHE_EXPIRY_HOURS."""
     if not os.path.exists(CACHE_FILE):
         return False
-    modified = datetime.datetime.fromtimestamp(os.path.getmtime(CACHE_FILE))
-    return (datetime.datetime.now() - modified) <= datetime.timedelta(hours=CACHE_EXPIRY_HOURS)
+    modified = datetime.datetime.fromtimestamp(os.path.getmtime(CACHE_FILE), tz=datetime.timezone.utc)
+    return (datetime.datetime.now(datetime.timezone.utc) - modified) <= datetime.timedelta(hours=CACHE_EXPIRY_HOURS)
 
 
 def load_cache():
