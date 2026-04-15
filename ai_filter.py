@@ -133,3 +133,102 @@ def filter_videos(videos):
     except Exception:
         logger.exception("Gemini API error or JSON parse error")
         return videos
+
+
+def check_already_watched(candidate_videos, watched_ids):
+    """
+    Ask Gemini whether any candidate video was effectively already watched.
+
+    A video is considered "already watched" if it is semantically equivalent to
+    something the user has previously seen — e.g. the same story re-uploaded
+    with a minor title change, a duplicate upload, etc.
+
+    Parameters
+    ----------
+    candidate_videos : list[dict]
+        Videos whose IDs are not in the local watched history.
+    watched_ids : list[str]
+        The capped (≤ 100) list of previously watched video IDs.
+
+    Returns
+    -------
+    list[dict]
+        The subset of *candidate_videos* that are genuinely new.
+        Returns *candidate_videos* unchanged on any error.
+    """
+    if not client:
+        logger.warning("No Gemini client; skipping already-watched check.")
+        return candidate_videos
+
+    if not candidate_videos:
+        return []
+
+    # If there's no watch history there's nothing to compare against
+    if not watched_ids:
+        return candidate_videos
+
+    prompt = """
+You are a video deduplication assistant for a YouTube chronological player.
+
+The user has previously watched the YouTube videos whose IDs are listed under
+"Watched Video IDs". You are given a list of candidate videos (with metadata)
+that are about to be added to the user's unwatched queue.
+
+Your task: identify which candidates are TRULY NEW content that the user has
+NOT watched before. A candidate is NOT truly new if:
+- It has the same YouTube video ID as a watched video (but these should already
+  be filtered — double-check anyway).
+- It is a re-upload, mirror, or nearly identical copy of a watched video.
+- It covers the exact same narrow news event/story as a watched video and adds
+  no new information.
+
+Use Google Search to look up any video ID you need more context on.
+
+Return ONLY a JSON array of video IDs from the candidate list that are truly new.
+No markdown, no explanation — just the JSON array.
+"""
+
+    payload = {
+        "watched_video_ids": watched_ids,
+        "candidate_videos": [
+            {
+                "id": v["id"],
+                "title": v.get("title", ""),
+                "channelTitle": v.get("channelTitle", ""),
+                "publishedAt": v.get("publishedAt", ""),
+            }
+            for v in candidate_videos
+        ],
+    }
+
+    try:
+        response = client.models.generate_content(
+            model='gemini-2.5-pro',
+            contents=f"{prompt}\n\nData:\n{json.dumps(payload, indent=2)}",
+            config=types.GenerateContentConfig(
+                tools=[{"google_search": {}}],
+                temperature=0.1,
+            ),
+        )
+
+        raw = _CODEBLOCK_RE.sub('', response.text).strip()
+        truly_new_ids = set(json.loads(raw))
+
+        result = [v for v in candidate_videos if v['id'] in truly_new_ids]
+
+        removed = len(candidate_videos) - len(result)
+        logger.info(
+            "Already-watched check: %d candidates → %d truly new (%d suppressed)",
+            len(candidate_videos), len(result), removed,
+        )
+
+        # Safety: if Gemini nukes everything, fall back to all candidates
+        if not result and candidate_videos:
+            logger.warning("Already-watched check removed all candidates; falling back.")
+            return candidate_videos
+
+        return result
+
+    except Exception:
+        logger.exception("check_already_watched: Gemini error or JSON parse error")
+        return candidate_videos

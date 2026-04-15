@@ -13,6 +13,7 @@ import requests
 import config_manager as cfg
 import youtube_api
 import ai_filter
+import storage_manager
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +104,24 @@ def _fetch_all_videos_stream():
     yield _sse_event({'type': 'progress', 'message': 'Analyzing videos with AI ...'})
     filtered_videos = ai_filter.filter_videos(all_videos)
 
-    cfg.save_cache(filtered_videos)
-    yield _sse_event({'type': 'videos', 'videos': filtered_videos})
+    # ── Already-watched check ────────────────────────────────────────────────
+    # Split into IDs we already know about locally vs. candidates.
+    watched_ids = storage_manager.get_watched_ids()
+    watched_set = set(watched_ids)
+
+    known_watched = [v for v in filtered_videos if v['id'] in watched_set]
+    candidates    = [v for v in filtered_videos if v['id'] not in watched_set]
+
+    if candidates and watched_ids:
+        yield _sse_event({'type': 'progress', 'message': 'Checking watched history with Gemini ...'})
+        candidates = ai_filter.check_already_watched(candidates, watched_ids)
+
+    # Recombine: already-known-watched ones are kept in the list so the UI
+    # can still render them with the "watched" badge; only the Gemini-confirmed
+    # new videos are surfaced as unwatched.
+    truly_new = known_watched + candidates
+    # ────────────────────────────────────────────────────────────────────────
+
+    cfg.save_cache(truly_new)
+    yield _sse_event({'type': 'videos', 'videos': truly_new})
     yield _sse_event({'type': 'done', 'message': 'Sync complete!'})
