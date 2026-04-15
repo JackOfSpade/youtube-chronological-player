@@ -1,5 +1,6 @@
 #!/bin/bash
-cd "$(dirname "$0")"
+APP_DIR="/Users/jack/Desktop/My Apps/youtube-chronological-player"
+cd "$APP_DIR" || { echo "ERROR: App directory not found at $APP_DIR"; exit 1; }
 
 # Kill any existing instance on port 5001
 existing_pid=$(lsof -ti :5001 2>/dev/null)

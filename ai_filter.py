@@ -6,7 +6,6 @@ representative video when multiple channels cover the same news story.
 """
 
 import os
-import re
 import json
 import logging
 import concurrent.futures
@@ -35,7 +34,21 @@ except Exception:
     client = None
 
 
-_CODEBLOCK_RE = re.compile(r'^```\w*\n?|```$', re.MULTILINE)
+# ── Shared response schema ───────────────────────────────────────────────────
+# Both filter functions return the same shape: {"video_ids": ["id1", "id2", ...]}
+# Declaring this as a response_schema enforces it at the token-sampling level —
+# Gemini cannot output anything that doesn't match this structure.
+
+_VIDEO_IDS_SCHEMA = types.Schema(
+    type=types.Type.OBJECT,
+    properties={
+        "video_ids": types.Schema(
+            type=types.Type.ARRAY,
+            items=types.Schema(type=types.Type.STRING),
+        )
+    },
+    required=["video_ids"],
+)
 
 
 def get_video_transcript(video_id):
@@ -74,14 +87,9 @@ def filter_videos(videos):
     1. PRIORITY 1 (Narration): Read the provided 'transcript_snippet' for each video. You MUST prefer videos that contain structured narration/commentary over videos that are just unstructured background noise (raw footage). Keep raw footage only if it is the absolute ONLY option.
     2. PRIORITY 2 (Unbiasedness as Tie-Breaker): If multiple videos for the same story have structured narration, use Google Search to research those channels and determine their current media bias and reputation. Break the tie by keeping the video from the most neutral/unbiased channel.
     3. If videos do not cover the same story as another, keep them.
-    4. Keep the output strictly as a JSON array.
     
-    Input data format:
-    JSON array of objects with keys: id, title, channelTitle, transcript_snippet
-    
-    Output format:
-    A pure JSON array of strings containing ONLY the video IDs that should be kept.
-    Do not include markdown codeblocks or any explanations. Just the JSON array.
+    Return a JSON object with a single key "video_ids" whose value is an array of
+    the video ID strings that should be kept. Include every ID that survives dedup.
     """
 
     video_metadata = []
@@ -113,11 +121,12 @@ def filter_videos(videos):
             config=types.GenerateContentConfig(
                 tools=[{"google_search": {}}],
                 temperature=0.1,
+                response_mime_type="application/json",
+                response_schema=_VIDEO_IDS_SCHEMA,
             ),
         )
 
-        kept_ids_text = _CODEBLOCK_RE.sub('', response.text).strip()
-        kept_ids = json.loads(kept_ids_text)
+        kept_ids = response.parsed["video_ids"]
         kept_set = set(kept_ids)
 
         filtered = [v for v in videos if v['id'] in kept_set]
@@ -131,7 +140,7 @@ def filter_videos(videos):
 
         return filtered
     except Exception:
-        logger.exception("Gemini API error or JSON parse error")
+        logger.exception("Gemini API error or schema parse error")
         return videos
 
 
@@ -148,7 +157,7 @@ def check_already_watched(candidate_videos, watched_ids):
     candidate_videos : list[dict]
         Videos whose IDs are not in the local watched history.
     watched_ids : list[str]
-        The capped (≤ 100) list of previously watched video IDs.
+        The capped (≤ 500) list of previously watched video IDs.
 
     Returns
     -------
@@ -171,21 +180,21 @@ def check_already_watched(candidate_videos, watched_ids):
 You are a video deduplication assistant for a YouTube chronological player.
 
 The user has previously watched the YouTube videos whose IDs are listed under
-"Watched Video IDs". You are given a list of candidate videos (with metadata)
+"watched_video_ids". You are given a list of candidate videos (with metadata)
 that are about to be added to the user's unwatched queue.
 
 Your task: identify which candidates are TRULY NEW content that the user has
 NOT watched before. A candidate is NOT truly new if:
-- It has the same YouTube video ID as a watched video (but these should already
-  be filtered — double-check anyway).
+- It has the same YouTube video ID as a watched video (double-check anyway).
 - It is a re-upload, mirror, or nearly identical copy of a watched video.
 - It covers the exact same narrow news event/story as a watched video and adds
   no new information.
 
 Use Google Search to look up any video ID you need more context on.
 
-Return ONLY a JSON array of video IDs from the candidate list that are truly new.
-No markdown, no explanation — just the JSON array.
+Return a JSON object with a single key "video_ids" whose value is an array of
+the candidate video IDs that are truly new. Only include IDs from the candidate
+list — never invent IDs.
 """
 
     payload = {
@@ -208,11 +217,12 @@ No markdown, no explanation — just the JSON array.
             config=types.GenerateContentConfig(
                 tools=[{"google_search": {}}],
                 temperature=0.1,
+                response_mime_type="application/json",
+                response_schema=_VIDEO_IDS_SCHEMA,
             ),
         )
 
-        raw = _CODEBLOCK_RE.sub('', response.text).strip()
-        truly_new_ids = set(json.loads(raw))
+        truly_new_ids = set(response.parsed["video_ids"])
 
         result = [v for v in candidate_videos if v['id'] in truly_new_ids]
 
@@ -230,5 +240,5 @@ No markdown, no explanation — just the JSON array.
         return result
 
     except Exception:
-        logger.exception("check_already_watched: Gemini error or JSON parse error")
+        logger.exception("check_already_watched: Gemini error or schema parse error")
         return candidate_videos
