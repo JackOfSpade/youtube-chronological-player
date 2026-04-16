@@ -102,14 +102,16 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
             pub_dt = dateutil_parser.parse(snippet['publishedAt'])
 
             if pub_dt >= start_dt:
-                videos.append({
-                    'id': snippet['resourceId']['videoId'],
-                    'title': snippet['title'],
-                    'channelTitle': snippet['channelTitle'],
-                    'channelId': snippet['channelId'],
-                    'publishedAt': snippet['publishedAt'],
-                    'thumbnail': _get_thumbnail_url(snippet),
-                })
+                title = snippet.get('title', '')
+                if title not in ('Private video', 'Deleted video'):
+                    videos.append({
+                        'id': snippet['resourceId']['videoId'],
+                        'title': title,
+                        'channelTitle': snippet.get('channelTitle', ''),
+                        'channelId': snippet.get('channelId', ''),
+                        'publishedAt': snippet['publishedAt'],
+                        'thumbnail': _get_thumbnail_url(snippet),
+                    })
             oldest_in_batch = pub_dt
 
         next_page_token = data.get('nextPageToken')

@@ -46,20 +46,25 @@ def atomic_write_json(data, target_path, directory=DATA_DIR):
 # ── Config ──────────────────────────────────────────────────────────────────
 
 def load_config():
-    """Load config.yaml. Returns None if file doesn't exist."""
+    """Load config.yaml. Returns None if file doesn't exist or is corrupt."""
     if not os.path.exists(CONFIG_FILE):
         return None
-    with open(CONFIG_FILE, 'r') as f:
-        return yaml.safe_load(f)
+    try:
+        with open(CONFIG_FILE, 'r') as f:
+            return yaml.safe_load(f)
+    except Exception as exc:
+        logger.error("Failed to parse config.yaml: %s", exc)
+        return None
 
 
 def save_channels(channels_list):
     """Persist the channels list into config.yaml (preserves other keys)."""
     config = load_config()
-    if config is not None:
-        config['channels'] = channels_list
-        with open(CONFIG_FILE, 'w') as f:
-            yaml.safe_dump(config, f, sort_keys=False)
+    if config is None:
+        config = {'api_key': _PLACEHOLDER_KEY, 'lookback_hours': DEFAULT_LOOKBACK_HOURS}
+    config['channels'] = channels_list
+    with open(CONFIG_FILE, 'w') as f:
+        yaml.safe_dump(config, f, sort_keys=False)
 
 
 def is_api_key_valid(api_key):

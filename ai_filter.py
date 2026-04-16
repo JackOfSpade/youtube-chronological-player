@@ -122,11 +122,10 @@ def filter_videos(videos):
                 tools=[{"google_search": {}}],
                 temperature=0.1,
                 response_mime_type="application/json",
-                response_schema=_VIDEO_IDS_SCHEMA,
             ),
         )
 
-        kept_ids = response.parsed["video_ids"]
+        kept_ids = json.loads(response.text).get("video_ids", [])
         kept_set = set(kept_ids)
 
         filtered = [v for v in videos if v['id'] in kept_set]
@@ -218,11 +217,10 @@ list — never invent IDs.
                 tools=[{"google_search": {}}],
                 temperature=0.1,
                 response_mime_type="application/json",
-                response_schema=_VIDEO_IDS_SCHEMA,
             ),
         )
 
-        truly_new_ids = set(response.parsed["video_ids"])
+        truly_new_ids = set(json.loads(response.text).get("video_ids", []))
 
         result = [v for v in candidate_videos if v['id'] in truly_new_ids]
 

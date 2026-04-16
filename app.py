@@ -77,7 +77,7 @@ def get_config():
 @app.route('/api/channels', methods=['POST'])
 def save_channels():
     data = request.json
-    if not data or not isinstance(data.get('channels'), list):
+    if not isinstance(data, dict) or not isinstance(data.get('channels'), list):
         return jsonify({'status': 'error', 'message': 'Invalid payload'}), 400
     cfg.save_channels(data['channels'])
     return jsonify({'status': 'success'})
@@ -122,4 +122,4 @@ def get_history():
 # ── Entry Point ─────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    app.run(debug=True, host='127.0.0.1', port=5001)
+    app.run(debug=True, host='127.0.0.1', port=5002)

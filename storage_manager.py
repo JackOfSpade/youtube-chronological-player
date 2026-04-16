@@ -66,14 +66,14 @@ def get_watched_ids():
 def _load_unlocked():
     if not os.path.exists(HISTORY_FILE):
         return _make_default()
-    with open(HISTORY_FILE, 'r') as f:
-        try:
+    try:
+        with open(HISTORY_FILE, 'r') as f:
             data = json.load(f)
             if not isinstance(data.get('watched_video_ids'), list):
                 return _make_default()
             return data
-        except (json.JSONDecodeError, ValueError):
-            return _make_default()
+    except Exception:
+        return _make_default()
 
 
 def _save_unlocked(history):

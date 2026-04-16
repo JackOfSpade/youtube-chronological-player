@@ -74,30 +74,29 @@ def _fetch_all_videos_stream():
 
     all_videos = []
 
-    def _process_channel(channel, session):
-        ch_id = cfg.normalize_channel_id(channel)
-        ch_name = cfg.normalize_channel_name(channel)
-        playlist_id = youtube_api.get_uploads_playlist_id(ch_id, api_key, session=session)
-        videos = []
-        if playlist_id:
-            videos = youtube_api.fetch_videos_from_playlist(playlist_id, start_date, api_key, session=session)
-        return ch_name, videos
+    def _process_channel(channel):
+        with requests.Session() as session:
+            ch_id = cfg.normalize_channel_id(channel)
+            ch_name = cfg.normalize_channel_name(channel)
+            playlist_id = youtube_api.get_uploads_playlist_id(ch_id, api_key, session=session)
+            videos = []
+            if playlist_id:
+                videos = youtube_api.fetch_videos_from_playlist(playlist_id, start_date, api_key, session=session)
+            return ch_name, videos
 
     yield _sse_event({'type': 'progress', 'message': f'Syncing {len(channels)} channels in parallel ...'})
 
-    # Session provides HTTP connection pooling across threads
-    with requests.Session() as session:
-        max_workers = min(cfg.MAX_PARALLEL_CHANNELS, len(channels))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(_process_channel, ch, session): ch for ch in channels}
-            for future in concurrent.futures.as_completed(futures):
-                try:
-                    ch_name, videos = future.result()
-                    if videos:
-                        all_videos.extend(videos)
-                        yield _sse_event({'type': 'progress', 'message': f'Finished {ch_name} ...'})
-                except Exception as exc:
-                    logger.exception("Channel sync failed: %s", exc)
+    max_workers = min(cfg.MAX_PARALLEL_CHANNELS, len(channels))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_process_channel, ch): ch for ch in channels}
+        for future in concurrent.futures.as_completed(futures):
+            try:
+                ch_name, videos = future.result()
+                if videos:
+                    all_videos.extend(videos)
+                    yield _sse_event({'type': 'progress', 'message': f'Finished {ch_name} ...'})
+            except Exception as exc:
+                logger.exception("Channel sync failed: %s", exc)
 
     youtube_api.sort_videos_newest_first(all_videos)
 
