@@ -7,6 +7,7 @@ and returns parsed data.  No config loading, no caching, no orchestration.
 
 import datetime
 import logging
+import functools
 import requests
 from dateutil import parser as dateutil_parser
 
@@ -14,8 +15,12 @@ import config_manager as cfg
 
 logger = logging.getLogger(__name__)
 
-
 # ── Low-level request wrapper ───────────────────────────────────────────────
+
+_global_session = requests.Session()
+_adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+_global_session.mount('https://', _adapter)
+_global_session.mount('http://', _adapter)
 
 def _safe_dict_get(data, *keys):
     """Safely traverse nested dictionaries, guaranteeing a dict return."""
@@ -28,14 +33,25 @@ def _safe_dict_get(data, *keys):
     return current if isinstance(current, dict) else {}
 
 
+@functools.lru_cache(maxsize=2000)
 def _parse_iso_datetime(date_str, default_min=False):
     """Parse an ISO date string into a UTC-aware datetime."""
     if not date_str:
         return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc) if default_min else None
-    if isinstance(date_str, str) and len(date_str) > 100:
-        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc) if default_min else None
+    
     try:
-        dt = dateutil_parser.parse(str(date_str))
+        date_str = str(date_str)
+        if len(date_str) > 100:
+            return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc) if default_min else None
+            
+        try:
+            if date_str.endswith('Z'):
+                dt = datetime.datetime.fromisoformat(date_str[:-1] + '+00:00')
+            else:
+                dt = datetime.datetime.fromisoformat(date_str)
+        except ValueError:
+            dt = dateutil_parser.parse(date_str)
+            
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=datetime.timezone.utc)
         return dt
@@ -45,13 +61,17 @@ def _parse_iso_datetime(date_str, default_min=False):
 
 def _api_get(url, params=None, session=None):
     """Perform a GET with timeout.  Returns parsed JSON or {} on failure."""
-    requester = session or requests
+    requester = session or _global_session
     try:
         resp = requester.get(url, params=params, timeout=cfg.API_TIMEOUT)
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        return data if isinstance(data, dict) else {}
     except (requests.RequestException, ValueError, TypeError) as exc:
-        logger.warning("YouTube API request failed: %s — %s", url, exc)
+        err_msg = str(exc)
+        if params and 'key' in params:
+            err_msg = err_msg.replace(params['key'], '***MASKED***')
+        logger.warning("YouTube API request failed: %s — %s", url, err_msg)
         return {}
 
 
@@ -59,6 +79,9 @@ def _api_get(url, params=None, session=None):
 
 def get_uploads_playlist_id(channel_id, api_key, session=None):
     """Return the 'uploads' playlist ID for a channel, or None."""
+    if not cfg.is_api_key_valid(api_key):
+        return None
+
     data = _api_get(
         "https://www.googleapis.com/youtube/v3/channels",
         params={'part': 'contentDetails', 'id': channel_id, 'key': api_key},
@@ -67,11 +90,11 @@ def get_uploads_playlist_id(channel_id, api_key, session=None):
     items = data.get('items')
     if isinstance(items, list) and items and isinstance(items[0], dict):
         upl = _safe_dict_get(items[0], 'contentDetails', 'relatedPlaylists').get('uploads')
-        return str(upl) if isinstance(upl, (str, int)) else None
+        return str(upl) if isinstance(upl, str) and upl.strip() else None
     return None
 
 
-def search_channels(query, api_key):
+def search_channels(query, api_key, session=None):
     """Search for YouTube channels by name.  Returns a list of dicts."""
     if not query or not cfg.is_api_key_valid(api_key):
         return []
@@ -79,6 +102,7 @@ def search_channels(query, api_key):
     data = _api_get(
         "https://www.googleapis.com/youtube/v3/search",
         params={'part': 'snippet', 'type': 'channel', 'q': query, 'maxResults': 5, 'key': api_key},
+        session=session,
     )
 
     items = data.get('items')
@@ -92,7 +116,7 @@ def search_channels(query, api_key):
             'thumbnail': str(_get_thumbnail_url(item['snippet'])),
         }
         for item in items
-        if isinstance(item, dict) and isinstance(item.get('snippet'), dict) and isinstance(item['snippet'].get('channelId'), (str, int)) and item['snippet'].get('channelId')
+        if isinstance(item, dict) and isinstance(item.get('snippet'), dict) and isinstance(item['snippet'].get('channelId'), str) and item['snippet']['channelId'].strip()
     ]
 
 
@@ -103,6 +127,9 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
     Fetch all videos from a playlist published on or after *start_date_iso*.
     Stops paginating once the entire batch is older than the window.
     """
+    if not cfg.is_api_key_valid(api_key):
+        return []
+
     videos = []
     next_page_token = ""
     start_dt = _parse_iso_datetime(start_date_iso, default_min=True)
@@ -143,7 +170,7 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
             if pub_dt >= start_dt:
                 title = snippet.get('title') or ''
                 video_id = _safe_dict_get(snippet, 'resourceId').get('videoId', '')
-                if not isinstance(video_id, (str, int)) or not video_id:
+                if not isinstance(video_id, str) or not video_id.strip():
                     continue
                 if title not in ('Private video', 'Deleted video'):
                     videos.append({
@@ -169,7 +196,7 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
 
 # ── Comments ────────────────────────────────────────────────────────────────
 
-def fetch_video_comments(video_id, api_key, page_token=None):
+def fetch_video_comments(video_id, api_key, page_token=None, session=None):
     """Fetch a page of top-level comment threads with replies."""
     if not video_id or not cfg.is_api_key_valid(api_key):
         return {"comments": [], "nextPageToken": None}
@@ -184,7 +211,7 @@ def fetch_video_comments(video_id, api_key, page_token=None):
     if page_token:
         params['pageToken'] = page_token
 
-    data = _api_get("https://www.googleapis.com/youtube/v3/commentThreads", params=params)
+    data = _api_get("https://www.googleapis.com/youtube/v3/commentThreads", params=params, session=session)
 
     items = data.get('items')
     if not isinstance(items, list):
@@ -194,10 +221,10 @@ def fetch_video_comments(video_id, api_key, page_token=None):
     for item in items:
         if not isinstance(item, dict): continue
         top_snippet = _safe_dict_get(item, 'snippet', 'topLevelComment', 'snippet')
-        comment_obj = _parse_comment(top_snippet, item.get('id') if isinstance(item.get('id'), (str, int)) else '')
+        comment_obj = _parse_comment(top_snippet, item.get('id') if isinstance(item.get('id'), str) else '')
         raw_comments = _safe_dict_get(item, 'replies').get('comments')
         comment_obj['replies'] = [
-            _parse_comment(_safe_dict_get(r, 'snippet'), r.get('id') if isinstance(r.get('id'), (str, int)) else '')
+            _parse_comment(_safe_dict_get(r, 'snippet'), r.get('id') if isinstance(r.get('id'), str) else '')
             for r in (raw_comments if isinstance(raw_comments, list) else [])
             if isinstance(r, dict)
         ]

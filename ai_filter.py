@@ -10,6 +10,7 @@ import re
 import json
 import logging
 import concurrent.futures
+import functools
 
 from dotenv import load_dotenv
 from google import genai
@@ -35,17 +36,17 @@ except Exception:
     client = None
 
 
-
-
-
+@functools.lru_cache(maxsize=2000)
 def get_video_transcript(video_id):
     """Fetch the first ~1000 chars of an English transcript, or a placeholder."""
-    if not video_id or video_id == 'unknown':
+    if not video_id or video_id == 'unknown' or not isinstance(video_id, (str, int, float)):
+        return "<No transcript available>"
+    video_id = str(video_id)
+    if len(video_id) > 100:
         return "<No transcript available>"
     
     try:
-        ytt_api = YouTubeTranscriptApi()
-        transcript_list = ytt_api.list(video_id)
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
         try:
             transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
         except Exception:
@@ -85,6 +86,9 @@ def filter_videos(videos):
 
     if not videos:
         return []
+        
+    if len(videos) <= 1:
+        return videos
 
     prompt = """
     You are given a list of recently published YouTube videos from various channels.
@@ -185,114 +189,3 @@ def filter_videos(videos):
         return videos
 
 
-def check_already_watched(candidate_videos, watched_ids):
-    """
-    Ask Gemini whether any candidate video was effectively already watched.
-
-    A video is considered "already watched" if it is semantically equivalent to
-    something the user has previously seen — e.g. the same story re-uploaded
-    with a minor title change, a duplicate upload, etc.
-
-    Parameters
-    ----------
-    candidate_videos : list[dict]
-        Videos whose IDs are not in the local watched history.
-    watched_ids : list[str]
-        The capped (≤ 500) list of previously watched video IDs.
-
-    Returns
-    -------
-    list[dict]
-        The subset of *candidate_videos* that are genuinely new.
-        Returns *candidate_videos* unchanged on any error.
-    """
-    if not client:
-        logger.warning("No Gemini client; skipping already-watched check.")
-        return candidate_videos
-
-    if not candidate_videos:
-        return []
-
-    # If there's no watch history there's nothing to compare against
-    if not watched_ids:
-        return candidate_videos
-
-    prompt = """
-You are a video deduplication assistant for a YouTube chronological player.
-
-The user has previously watched the YouTube videos whose IDs are listed under
-"watched_video_ids". You are given a list of candidate videos (with metadata)
-that are about to be added to the user's unwatched queue.
-
-Your task: identify which candidates are TRULY NEW content that the user has
-NOT watched before. A candidate is NOT truly new if:
-- It has the same YouTube video ID as a watched video (double-check anyway).
-- It is a re-upload, mirror, or nearly identical copy of a watched video.
-- It covers the exact same narrow news event/story as a watched video and adds
-  no new information.
-
-Use Google Search to look up any video ID you need more context on.
-
-Return a JSON object with a single key "video_ids" whose value is an array of
-the candidate video IDs that are truly new. Only include IDs from the candidate
-list — never invent IDs.
-"""
-
-    payload = {
-        "watched_video_ids": watched_ids,
-        "candidate_videos": [
-            {
-                "id": v.get("id", ""),
-                "title": v.get("title", ""),
-                "channelTitle": v.get("channelTitle", ""),
-                "publishedAt": v.get("publishedAt", ""),
-            }
-            for v in candidate_videos if isinstance(v, dict)
-        ],
-    }
-
-    try:
-        response = client.models.generate_content(
-            model='gemini-2.5-pro',
-            contents=f"{prompt}\n\nData:\n{json.dumps(payload, indent=2)}",
-            config=types.GenerateContentConfig(
-                tools=[{"google_search": {}}],
-                temperature=0.1,
-            ),
-        )
-
-        try:
-            text = response.text.strip()
-            text = _extract_json_from_text(text)
-        except ValueError:
-            logger.warning("Gemini Safety Filter blocked prompt payload correctly dropping to empty responses.")
-            text = "{}"
-
-        try:
-            parsed = json.loads(text)
-            if not isinstance(parsed, dict):
-                parsed = {}
-        except Exception:
-            parsed = {}
-
-        v_ids = parsed.get("video_ids", [])
-        if not isinstance(v_ids, list):
-            v_ids = []
-
-        truly_new_ids = set(str(v) for v in v_ids if isinstance(v, (str, int, float, bool)))
-
-        result = [v for v in candidate_videos if isinstance(v, dict) and str(v.get('id')) in truly_new_ids]
-
-        removed = len(candidate_videos) - len(result)
-        logger.info(
-            "Already-watched check: %d candidates → %d truly new (%d suppressed)",
-            len(candidate_videos), len(result), removed,
-        )
-
-        # Legitimate 0-length results indicate all candidate videos are already-watched.
-        # We do not fall back here, as returning [] is the correct intent for full-duplicate batches.
-        return result
-
-    except Exception:
-        logger.exception("check_already_watched: Gemini error or schema parse error")
-        return candidate_videos

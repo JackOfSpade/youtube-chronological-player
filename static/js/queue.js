@@ -38,6 +38,15 @@ export function resizeQueue() {
 
 /** Render the current page of videos into the queue panel. */
 export function renderQueue() {
+    if (state.isSyncing) {
+        DOM.queueList.innerHTML = `
+            <div class="skeleton-item"></div>
+            <div class="skeleton-item"></div>
+            <div class="skeleton-item"></div>
+        `;
+        return;
+    }
+
     DOM.queueList.innerHTML = '';
 
     if (state.queue.length === 0) {
@@ -106,13 +115,11 @@ export function loadQueueData(force = false) {
         state.syncEventSource = null;
     }
 
-    DOM.queueList.innerHTML = `
-        <div class="skeleton-item"></div>
-        <div class="skeleton-item"></div>
-        <div class="skeleton-item"></div>
-    `;
-    state.queue = [];
-    state.queueIndex.clear();
+    const previousQueue = [...state.queue];
+    const previousIndex = new Map(state.queueIndex);
+
+    state.isSyncing = true;
+    renderQueue();
 
     const url = force ? '/api/sync/stream?force=true' : '/api/sync/stream';
     const es = new EventSource(url);
@@ -125,15 +132,21 @@ export function loadQueueData(force = false) {
             if (data.type === 'init') {
                 data.api_key_configured ? hideNotification() : showNotification('YouTube API Key is not configured. Please edit config.yaml.');
                 state.watchHistory = {
-                    watched_video_ids: new Set(data.history?.watched_video_ids || []),
+                    watched_video_ids: new Set(Array.isArray(data.history?.watched_video_ids) ? data.history.watched_video_ids : []),
                     last_watched_video_id: data.history?.last_watched_video_id || null,
                 };
             }
             else if (data.type === 'videos') {
-                for (const v of (data.videos || [])) {
-                    if (v && v.id && !state.queueIndex.has(v.id)) {
-                        state.queue.push(v);
-                        state.queueIndex.set(v.id, state.queue.length - 1);
+                state.queue = [];
+                state.queueIndex.clear();
+                const vidList = Array.isArray(data.videos) ? data.videos : [];
+                for (const v of vidList) {
+                    if (v && v.id != null) {
+                        v.id = String(v.id);
+                        if (!state.queueIndex.has(v.id)) {
+                            state.queue.push(v);
+                            state.queueIndex.set(v.id, state.queue.length - 1);
+                        }
                     }
                 }
                 state.queue.sort((a, b) => {
@@ -148,12 +161,16 @@ export function loadQueueData(force = false) {
                 showNotification(data.message);
                 es.close();
                 state.syncEventSource = null;
+                state.isSyncing = false;
                 DOM.syncBtn.textContent = 'Sync';
+                state.queue = previousQueue;
+                state.queueIndex = previousIndex;
                 renderQueue();
             }
             else if (data.type === 'done') {
                 es.close();
                 state.syncEventSource = null;
+                state.isSyncing = false;
                 if (force) {
                     DOM.syncBtn.textContent = '✓';
                     setTimeout(() => { DOM.syncBtn.textContent = 'Sync'; }, 2000);
@@ -174,6 +191,7 @@ export function loadQueueData(force = false) {
             console.error('SSE parse error:', err);
             es.close();
             state.syncEventSource = null;
+            state.isSyncing = false;
             DOM.syncBtn.textContent = 'Sync';
             renderQueue();
         }
@@ -182,8 +200,11 @@ export function loadQueueData(force = false) {
     es.onerror = () => {
         es.close();
         state.syncEventSource = null;
+        state.isSyncing = false;
         showNotification('Error loading video queue. Check console.');
         DOM.syncBtn.textContent = 'Sync';
+        state.queue = previousQueue;
+        state.queueIndex = previousIndex;
         renderQueue();
     };
 }
@@ -192,7 +213,11 @@ export function loadQueueData(force = false) {
 
 function _scrollToCurrent() {
     if (!state.currentPlayingId) return;
-    const cleanId = CSS.escape(state.currentPlayingId);
-    const el = document.querySelector(`.video-item[data-id="${cleanId}"]`);
-    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const items = document.querySelectorAll('.video-item');
+    for (const el of items) {
+        if (el.dataset.id === state.currentPlayingId) {
+            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            break;
+        }
+    }
 }

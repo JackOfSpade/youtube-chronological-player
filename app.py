@@ -8,6 +8,7 @@ service module, and serializes the response.  No business logic lives here.
 import json
 import logging
 from flask import Flask, jsonify, request, render_template, Response
+from werkzeug.exceptions import HTTPException
 
 import config_manager as cfg
 import youtube_api
@@ -20,6 +21,25 @@ logging.basicConfig(
 )
 
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10 MB limit for JSON payloads
+
+
+# ── Global Error Handlers ───────────────────────────────────────────────────
+
+@app.errorhandler(Exception)
+def handle_exception(e):
+    # Pass through HTTP errors as JSON if they affect API endpoints
+    if request.path.startswith('/api/'):
+        if isinstance(e, HTTPException):
+            return jsonify({'status': 'error', 'message': e.description}), e.code
+        logging.exception("Unhandled Exception in API route")
+        return jsonify({'status': 'error', 'message': 'Internal Server Error'}), 500
+    
+    # For non-API routes (e.g. index.html), default behavior
+    if isinstance(e, HTTPException):
+        return e
+    logging.exception("Unhandled Exception in standard route")
+    return "Internal Server Error", 500
 
 
 # ── Pages ───────────────────────────────────────────────────────────────────
@@ -97,27 +117,12 @@ def save_channels():
     data = request.get_json(silent=True)
     if not isinstance(data, dict) or not isinstance(data.get('channels'), list):
         return jsonify({'status': 'error', 'message': 'Invalid payload'}), 400
-    channels = data.get('channels', [])
-    if len(channels) > 100:
-        return jsonify({'status': 'error', 'message': 'Too many channels'}), 400
-    sanitized = []
-    for c in channels:
-        if not isinstance(c, (str, dict)):
-            return jsonify({'status': 'error', 'message': 'Invalid channel format'}), 400
-        if isinstance(c, str):
-            c_str = c.strip()
-            if len(c_str) > 200:
-                return jsonify({'status': 'error', 'message': 'Channel string too large'}), 400
-            sanitized.append(c_str)
-        else:
-            cid = str(c.get('id') or '').strip()
-            cname = str(c.get('name') or '').strip()
-            if len(cid) > 200 or len(cname) > 200:
-                return jsonify({'status': 'error', 'message': 'Channel properties too large'}), 400
-            sanitized.append({'id': cid, 'name': cname})
+        
     try:
-        cfg.save_channels(sanitized)
+        cfg.save_channels(data.get('channels', []))
         return jsonify({'status': 'success'})
+    except ValueError as e:
+        return jsonify({'status': 'error', 'message': str(e)}), 400
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -142,7 +147,7 @@ def search_channels_route():
 @app.route('/api/comments/<video_id>')
 def get_comments(video_id):
     try:
-        if len(video_id) > 50:
+        if len(video_id) > 50 or video_id.lower() in ('none', 'undefined', 'null'):
             return jsonify({"comments": [], "nextPageToken": None})
 
         page_token = request.args.get('pageToken')
@@ -168,6 +173,8 @@ def mark_watched(video_id):
     try:
         if len(video_id) > 50:
             return jsonify({'status': 'error', 'message': 'ID too long'}), 400
+        if video_id.lower() in ('none', 'undefined', 'null'):
+            return jsonify({'status': 'error', 'message': 'Invalid ID'}), 400
         storage_manager.mark_watched(video_id)
         return jsonify({'status': 'success'})
     except Exception as e:
@@ -187,4 +194,4 @@ def get_history():
 # ── Entry Point ─────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    app.run(debug=True, host='127.0.0.1', port=5002)
+    app.run(debug=True, host='127.0.0.1', port=5001)

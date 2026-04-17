@@ -115,9 +115,11 @@ function _onError(event) {
 }
 
 function _handleEnded(videoId) {
-    fetch(`/api/watched/${encodeURIComponent(videoId)}`, { method: 'POST' }).catch(err => {
-        console.error('Failed to mark video as watched', err);
-    });
+    fetch(`/api/watched/${encodeURIComponent(videoId)}`, { method: 'POST' })
+        .then(res => { if (!res.ok) throw new Error(`HTTP error ${res.status}`); })
+        .catch(err => {
+            console.error('Failed to mark video as watched', err);
+        });
 
     state.watchHistory.watched_video_ids.add(videoId);
     state.watchHistory.last_watched_video_id = videoId;

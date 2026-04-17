@@ -4,12 +4,13 @@
 
 import { DOM, state, escapeHTML, formatDate, sanitizeHTML } from './state.js';
 
-// ── Public API ─────────────────────────────────────────────────────────────
+let _commentFetchId = 0;
 
 export async function loadComments(videoId, append = false) {
     if (!DOM.commentsSection) return;
     if (append && state.isFetchingComments) return;
 
+    const currentFetchId = ++_commentFetchId;
     state.isFetchingComments = true;
     DOM.commentsSection.classList.remove('hidden');
 
@@ -33,7 +34,8 @@ export async function loadComments(videoId, append = false) {
         if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
         const data = await resp.json();
 
-        if (state.currentPlayingId !== videoId) return; // Prevent rendering if navigated away
+        // Prevent rendering if a newer fetch was initiated or navigated away
+        if (_commentFetchId !== currentFetchId || state.currentPlayingId !== videoId) return;
 
         state.commentsToken = data.nextPageToken || null;
 
@@ -42,7 +44,7 @@ export async function loadComments(videoId, append = false) {
 
         _renderComments(data.comments, videoId, append);
     } catch (err) {
-        if (state.currentPlayingId !== videoId) return;
+        if (_commentFetchId !== currentFetchId || state.currentPlayingId !== videoId) return;
 
         const loader = document.getElementById('comments-loading-more');
         if (loader) loader.remove();
@@ -52,7 +54,7 @@ export async function loadComments(videoId, append = false) {
         }
         console.error(err);
     } finally {
-        if (state.currentPlayingId === videoId) {
+        if (_commentFetchId === currentFetchId && state.currentPlayingId === videoId) {
             state.isFetchingComments = false;
         }
     }
@@ -84,8 +86,8 @@ function _renderComments(comments, videoId, append) {
         thread.className = 'comment-thread';
 
         let repliesHTML = '';
-        if (c.replies && c.replies.length > 0) {
-            const sorted = [...(c.replies || [])].reverse();
+        if (Array.isArray(c.replies) && c.replies.length > 0) {
+            const sorted = [...c.replies].reverse();
             const items = sorted.map(r => `
                 <div class="comment-reply">
                     <img src="${escapeHTML(r.avatar)}" class="comment-avatar comment-avatar--reply" loading="lazy">

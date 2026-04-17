@@ -68,6 +68,7 @@ export const state = {
     settingsChannels: [],
     searchTimeout: null,
     syncEventSource: null,
+    isSyncing: false,
 };
 
 // ── Queue index helpers ────────────────────────────────────────────────────
@@ -92,8 +93,6 @@ export function findOldestUnwatchedIndex() {
 }
 
 // ── Utility functions ──────────────────────────────────────────────────────
-
-const _escapeEl = document.createElement('span');
 
 /** Escape a string for safe insertion into innerHTML. */
 export function escapeHTML(str) {

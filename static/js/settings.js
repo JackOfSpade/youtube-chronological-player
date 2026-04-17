@@ -26,8 +26,13 @@ export function closeSettingsModal() {
 export function handleAddChannel() {
     const val = DOM.channelInput.value.trim();
     if (val && !state.settingsChannels.some(c => c.id === val)) {
+        if (state.settingsChannels.length >= 100) {
+            showNotification('Maximum of 100 channels allowed.');
+            return;
+        }
         state.settingsChannels.push({ id: val, name: val });
         DOM.channelInput.value = '';
+        DOM.searchDropdown.classList.add('hidden');
         _renderChannels();
     }
 }
@@ -76,7 +81,7 @@ async function _fetchChannelConfig() {
         const res = await fetch('/api/config');
         if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
-        const raw = data.channels || [];
+        const raw = Array.isArray(data.channels) ? data.channels : [];
         state.settingsChannels = raw.map(c => {
             if (typeof c === 'string') return { id: c, name: c };
             if (!c || typeof c !== 'object') return { id: '', name: '' };
@@ -113,24 +118,8 @@ DOM.channelList.addEventListener('click', (e) => {
     const btn = e.target.closest('.remove-btn');
     if (!btn) return;
     const index = parseInt(btn.dataset.index, 10);
-    const removedId = state.settingsChannels[index].id;
     state.settingsChannels.splice(index, 1);
     _renderChannels();
-
-    // Instantly remove videos from the queue
-    state.queue = state.queue.filter(v => v.channelId !== removedId);
-    rebuildQueueIndex();
-
-    // Recalculate oldest unwatched video for pagination
-    const oldest = findOldestUnwatchedIndex();
-    if (oldest !== -1) {
-        state.currentPage = Math.floor(oldest / state.pageSize) + 1;
-    } else {
-        const total = Math.ceil(state.queue.length / state.pageSize);
-        if (state.currentPage > total && total > 0) state.currentPage = total;
-    }
-    renderQueue();
-    updateResumeButton();
 });
 
 
@@ -165,6 +154,10 @@ async function _search(query) {
             `;
             item.addEventListener('click', () => {
                 if (!state.settingsChannels.some(c => c.id === ch.channelId)) {
+                    if (state.settingsChannels.length >= 100) {
+                        showNotification('Maximum of 100 channels allowed.');
+                        return;
+                    }
                     state.settingsChannels.push({ id: ch.channelId, name: ch.title });
                     _renderChannels();
                 }

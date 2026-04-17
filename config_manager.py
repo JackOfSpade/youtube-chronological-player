@@ -11,8 +11,14 @@ import yaml
 import datetime
 import tempfile
 import logging
+import threading
+import copy
 
 logger = logging.getLogger(__name__)
+
+# ── Locks ───────────────────────────────────────────────────────────────────
+
+_config_lock = threading.Lock()
 
 # ── Path Constants ──────────────────────────────────────────────────────────
 
@@ -64,44 +70,89 @@ def atomic_write_yaml(data, target_path, directory='.'):
 
 # ── Config ──────────────────────────────────────────────────────────────────
 
+_config_cache = None
+_config_mtime = 0
+
 def load_config():
     """Load config.yaml. Returns None if file doesn't exist or is corrupt."""
+    global _config_cache, _config_mtime
+    
+    # Fast path: check mtime outside the lock
     if not os.path.exists(CONFIG_FILE):
         return None
     try:
-        with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-            content = f.read(1024 * 1024)
-            data = yaml.safe_load(content)
-            return data if isinstance(data, dict) else None
-    except Exception as exc:
-        logger.error("Failed to parse config.yaml: %s", exc)
+        current_mtime = os.path.getmtime(CONFIG_FILE)
+        if _config_cache is not None and _config_mtime == current_mtime:
+            return copy.deepcopy(_config_cache)
+    except Exception:
         return None
+        
+    with _config_lock:
+        # Re-check under lock to avoid race conditions
+        try:
+            current_mtime = os.path.getmtime(CONFIG_FILE)
+            if _config_cache is not None and _config_mtime == current_mtime:
+                return copy.deepcopy(_config_cache)
+                
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                content = f.read(1024 * 1024)
+                data = yaml.safe_load(content)
+                if isinstance(data, dict):
+                    _config_cache = data
+                    _config_mtime = current_mtime
+                    return copy.deepcopy(data)
+                return None
+        except Exception as exc:
+            logger.error("Failed to parse config.yaml: %s", exc)
+            return None
 
 
 def save_channels(channels_list):
     """Persist the channels list into config.yaml (preserves other keys)."""
-    if os.path.exists(CONFIG_FILE):
-        try:
-            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                content = f.read(1024 * 1024)
-                config = yaml.safe_load(content)
-            if config is not None and not isinstance(config, dict):
-                raise RuntimeError("config.yaml contains invalid structure (not a dictionary).")
-            if not isinstance(config, dict):
-                config = {'api_key': _PLACEHOLDER_KEY, 'lookback_hours': DEFAULT_LOOKBACK_HOURS}
-        except Exception as exc:
-            logger.error("Refusing to overwrite corrupted config.yaml: %s", exc)
-            raise RuntimeError(f"config.yaml is corrupted or invalid. Please fix it manually before saving. ({exc})")
-    else:
-        config = {'api_key': _PLACEHOLDER_KEY, 'lookback_hours': DEFAULT_LOOKBACK_HOURS}
+    if channels_list is None:
+        channels_list = []
+    if len(channels_list) > 100:
+        raise ValueError('Too many channels')
+        
+    sanitized = []
+    for c in channels_list:
+        if not isinstance(c, (str, dict)):
+            raise ValueError('Invalid channel format')
+        if isinstance(c, str):
+            c_str = c.strip()
+            if len(c_str) > 200:
+                raise ValueError('Channel string too large')
+            sanitized.append(c_str)
+        else:
+            cid = str(c.get('id') or '').strip()
+            cname = str(c.get('name') or '').strip()
+            if len(cid) > 200 or len(cname) > 200:
+                raise ValueError('Channel properties too large')
+            sanitized.append({'id': cid, 'name': cname})
 
-    config['channels'] = channels_list or []
-    atomic_write_yaml(config, CONFIG_FILE)
+    with _config_lock:
+        if os.path.exists(CONFIG_FILE):
+            try:
+                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                    content = f.read(1024 * 1024)
+                    config = yaml.safe_load(content)
+                if config is not None and not isinstance(config, dict):
+                    raise RuntimeError("config.yaml contains invalid structure (not a dictionary).")
+                if not isinstance(config, dict):
+                    config = {'api_key': _PLACEHOLDER_KEY, 'lookback_hours': DEFAULT_LOOKBACK_HOURS}
+            except Exception as exc:
+                logger.error("Refusing to overwrite corrupted config.yaml: %s", exc)
+                raise RuntimeError(f"config.yaml is corrupted or invalid. Please fix it manually before saving. ({exc})")
+        else:
+            config = {'api_key': _PLACEHOLDER_KEY, 'lookback_hours': DEFAULT_LOOKBACK_HOURS}
+
+        config['channels'] = sanitized
+        atomic_write_yaml(config, CONFIG_FILE)
 
 
 def is_api_key_valid(api_key):
     """Check whether the API key is set and not the placeholder."""
-    return isinstance(api_key, str) and bool(api_key.strip()) and api_key.strip() != _PLACEHOLDER_KEY
+    return isinstance(api_key, str) and len(api_key) <= 500 and bool(api_key.strip()) and api_key.strip() != _PLACEHOLDER_KEY
 
 
 def is_api_configured():
@@ -133,7 +184,7 @@ def get_sync_params():
         try:
             start_date = (
                 datetime.datetime.now(datetime.timezone.utc)
-                - datetime.timedelta(hours=float(lookback))
+                - datetime.timedelta(hours=abs(float(lookback)))
             ).isoformat()
         except (ValueError, TypeError, OverflowError):
             start_date = (
@@ -159,6 +210,10 @@ def get_sync_params():
 
 # ── Cache ───────────────────────────────────────────────────────────────────
 
+_queue_cache = None
+_queue_mtime = 0
+_queue_lock = threading.Lock()
+
 def is_cache_valid():
     """True if the cache file exists and was written within CACHE_EXPIRY_HOURS."""
     try:
@@ -172,20 +227,49 @@ def is_cache_valid():
 
 def load_cache():
     """Load cached video list. Returns [] on missing or corrupt file."""
+    global _queue_cache, _queue_mtime
+    
     if not os.path.exists(CACHE_FILE):
         return []
+        
     try:
-        with open(CACHE_FILE, 'r', encoding='utf-8') as f:
-            content = f.read(10 * 1024 * 1024)
-            data = json.loads(content)
-            return data if isinstance(data, list) else []
+        current_mtime = os.path.getmtime(CACHE_FILE)
     except Exception:
         return []
+        
+    # Lockless quick read check
+    if _queue_cache is not None and _queue_mtime == current_mtime:
+        return copy.deepcopy(_queue_cache)
+        
+    with _queue_lock:
+        try:
+            current_mtime = os.path.getmtime(CACHE_FILE)
+            if _queue_cache is not None and _queue_mtime == current_mtime:
+                return copy.deepcopy(_queue_cache)
+                
+            with open(CACHE_FILE, 'r', encoding='utf-8') as f:
+                content = f.read(10 * 1024 * 1024)
+                data = json.loads(content)
+                if isinstance(data, list):
+                    _queue_cache = data
+                    _queue_mtime = current_mtime
+                    return copy.deepcopy(data)
+                return []
+        except Exception:
+            return []
 
 
 def save_cache(videos):
     """Atomically persist the video queue cache."""
+    global _queue_cache, _queue_mtime
     atomic_write_json(videos, CACHE_FILE)
+    with _queue_lock:
+        try:
+            _queue_cache = copy.deepcopy(videos)
+            _queue_mtime = os.path.getmtime(CACHE_FILE)
+        except Exception:
+            pass
+
 
 
 # ── Channel helpers ─────────────────────────────────────────────────────────
@@ -193,15 +277,29 @@ def save_cache(videos):
 def normalize_channel_id(channel):
     """Extract channel ID from either a plain string or a {id, name} dict."""
     if isinstance(channel, dict):
-        return str(channel.get('id') or channel.get('name') or '')
-    return str(channel)
+        val = channel.get('id') or channel.get('name')
+    else:
+        val = channel
+        
+    if not isinstance(val, str):
+        return ''
+    
+    val = val.strip()[:200]
+    return val if val.lower() not in ('none', 'null', 'undefined') else ''
 
 
 def normalize_channel_name(channel):
     """Extract display name from either a plain string or a {id, name} dict."""
     if isinstance(channel, dict):
-        return str(channel.get('name') or channel.get('id') or '')
-    return str(channel)
+        val = channel.get('name') or channel.get('id')
+    else:
+        val = channel
+        
+    if not isinstance(val, str):
+        return ''
+    
+    val = val.strip()[:200]
+    return val if val.lower() not in ('none', 'null', 'undefined') else ''
 
 
 def deduplicate_channels(raw_channels):

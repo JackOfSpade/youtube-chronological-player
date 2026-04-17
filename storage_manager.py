@@ -8,8 +8,12 @@ seen, which was last played).
 import json
 import os
 import threading
+import logging
+import copy
 
 import config_manager as cfg
+
+logger = logging.getLogger(__name__)
 
 HISTORY_FILE = 'data/history.json'
 MAX_WATCHED_HISTORY = 500   # oldest entries evicted when limit is exceeded
@@ -29,13 +33,14 @@ def _make_default():
 def load_history():
     """Thread-safe: load and return the watch history dict."""
     with _history_lock:
-        return _load_unlocked()
+        hist = _load_unlocked()
+        return copy.deepcopy(hist)
 
 
 def save_history(history):
     """Thread-safe: persist the entire history dict."""
     with _history_lock:
-        _save_unlocked(history)
+        _save_unlocked(copy.deepcopy(history))
 
 
 def mark_watched(video_id):
@@ -45,6 +50,11 @@ def mark_watched(video_id):
     evicted first when the cap is exceeded.
     """
     with _history_lock:
+        if not isinstance(video_id, str):
+            return
+        video_id = video_id.strip()[:100]
+        if not video_id or video_id.lower() in ('none', 'undefined', 'null'):
+            return
         history = _load_unlocked()
         watched = history['watched_video_ids']
         watched = [vid for vid in watched if vid != video_id]
@@ -64,6 +74,15 @@ def get_watched_ids():
 
 
 # ── Internal ────────────────────────────────────────────────────────────────
+
+def _sanitize_id(vid):
+    if not isinstance(vid, str):
+        return None
+    s = vid.strip()[:100]
+    if not s or s.lower() in ('none', 'undefined', 'null'):
+        return None
+    return s
+
 
 def _load_unlocked():
     global _history_cache
@@ -85,12 +104,16 @@ def _load_unlocked():
                 raw_ids = []
                 
             last_id = data.get('last_watched_video_id')
-            if not isinstance(last_id, (str, int, type(None))):
-                last_id = None
                 
+            sanitized_ids = []
+            for v in raw_ids:
+                sid = _sanitize_id(v)
+                if sid:
+                    sanitized_ids.append(sid)
+
             sanitized_data = {
-                'watched_video_ids': [str(v) for v in raw_ids if isinstance(v, (str, int, float, bool))],
-                'last_watched_video_id': str(last_id) if last_id is not None else None
+                'watched_video_ids': sanitized_ids,
+                'last_watched_video_id': _sanitize_id(last_id)
             }
             
             if len(sanitized_data['watched_video_ids']) > MAX_WATCHED_HISTORY:
@@ -106,4 +129,7 @@ def _load_unlocked():
 def _save_unlocked(history):
     global _history_cache
     _history_cache = history
-    cfg.atomic_write_json(history, HISTORY_FILE)
+    try:
+        cfg.atomic_write_json(history, HISTORY_FILE)
+    except Exception as exc:
+        logger.error("Failed to persist watch history: %s", exc)

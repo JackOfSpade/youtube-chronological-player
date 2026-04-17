@@ -9,6 +9,7 @@ import json
 import logging
 import concurrent.futures
 import requests
+import threading
 
 import config_manager as cfg
 import youtube_api
@@ -16,6 +17,10 @@ import ai_filter
 import storage_manager
 
 logger = logging.getLogger(__name__)
+
+# ── Locks ───────────────────────────────────────────────────────────────────
+
+_sync_lock = threading.Lock()
 
 
 # ── Queue (non-streaming) ──────────────────────────────────────────────────
@@ -33,6 +38,8 @@ def get_queue(force_sync=False):
             data = json.loads(event_str.removeprefix("data: ").strip())
             if data.get('type') == 'videos':
                 videos = data['videos']
+            elif data.get('type') == 'error':
+                raise RuntimeError(data.get('message', 'Sync failed'))
         except json.JSONDecodeError:
             pass
     return videos
@@ -53,7 +60,12 @@ def _deduplicate_by_id(videos):
         if not isinstance(v, dict):
             continue
         vid = v.get('id')
-        if vid and vid not in seen:
+        if type(vid) is not str:
+            continue
+        vid = vid.strip()
+        if not vid or vid.lower() in ('none', 'undefined', 'null'):
+            continue
+        if vid not in seen:
             seen.add(vid)
             deduped.append(v)
     return deduped
@@ -75,6 +87,17 @@ def get_queue_stream(force_sync=False):
 
 def _fetch_all_videos_stream():
     """Parallel-fetch all channels, yielding SSE progress events."""
+    if not _sync_lock.acquire(blocking=False):
+        yield _sse_event({'type': 'error', 'message': 'Sync already in progress. Please wait.'})
+        return
+
+    try:
+        yield from _fetch_all_videos_stream_locked()
+    finally:
+        _sync_lock.release()
+
+
+def _fetch_all_videos_stream_locked():
     config, api_key, start_date, raw_channels_list = cfg.get_sync_params()
 
     if not config:
@@ -94,14 +117,13 @@ def _fetch_all_videos_stream():
     all_videos = []
 
     def _process_channel(channel):
-        with requests.Session() as session:
-            ch_id = cfg.normalize_channel_id(channel)
-            ch_name = cfg.normalize_channel_name(channel)
-            playlist_id = youtube_api.get_uploads_playlist_id(ch_id, api_key, session=session)
-            videos = []
-            if playlist_id:
-                videos = youtube_api.fetch_videos_from_playlist(playlist_id, start_date, api_key, session=session)
-            return ch_name, videos
+        ch_id = cfg.normalize_channel_id(channel)
+        ch_name = cfg.normalize_channel_name(channel)
+        playlist_id = youtube_api.get_uploads_playlist_id(ch_id, api_key)
+        videos = []
+        if playlist_id:
+            videos = youtube_api.fetch_videos_from_playlist(playlist_id, start_date, api_key)
+        return ch_name, videos
 
     yield _sse_event({'type': 'progress', 'message': f'Syncing {len(channels)} channels in parallel ...'})
 
@@ -141,19 +163,12 @@ def _fetch_all_videos_stream():
     watched_set = set(watched_ids)
 
     known_watched = [v for v in filtered_videos if v.get('id') in watched_set]
-    candidates    = [v for v in filtered_videos if v.get('id') not in watched_set]
-
-    if candidates and watched_ids:
-        yield _sse_event({'type': 'progress', 'message': 'Checking watched history with Gemini ...'})
-        candidates = ai_filter.check_already_watched(candidates, watched_ids)
-
+    candidates = [v for v in filtered_videos if v.get('id') not in watched_set]
     # Recombine: already-known-watched ones are kept in the list so the UI
-    # can still render them with the "watched" badge; only the Gemini-confirmed
-    # new videos are surfaced as unwatched.
+    # can still render them with the "watched" badge; only genuinely new videos
+    # are surfaced as unwatched.
     truly_new = known_watched + candidates
     youtube_api.sort_videos_newest_first(truly_new)
-
-    truly_new = _deduplicate_by_id(truly_new)
     # ────────────────────────────────────────────────────────────────────────
 
     try:
