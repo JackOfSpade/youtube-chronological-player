@@ -22,7 +22,7 @@ export function resizeQueue() {
     const first = DOM.queueList.querySelector('.video-item, .skeleton-item');
     if (first && first.offsetHeight > 0) {
         const gap = parseFloat(getComputedStyle(DOM.queueList).gap) || 12;
-        itemH = first.offsetHeight + gap;
+        itemH = Math.max(1, first.offsetHeight + gap);
     }
     const calc = Math.max(1, Math.floor((h - 8) / itemH));
 
@@ -101,6 +101,11 @@ export function updateResumeButton() {
 
 /** Open an SSE connection and incrementally fill the queue. */
 export function loadQueueData(force = false) {
+    if (state.syncEventSource) {
+        state.syncEventSource.close();
+        state.syncEventSource = null;
+    }
+
     DOM.queueList.innerHTML = `
         <div class="skeleton-item"></div>
         <div class="skeleton-item"></div>
@@ -111,6 +116,7 @@ export function loadQueueData(force = false) {
 
     const url = force ? '/api/sync/stream?force=true' : '/api/sync/stream';
     const es = new EventSource(url);
+    state.syncEventSource = es;
 
     es.onmessage = (event) => {
         try {
@@ -124,20 +130,30 @@ export function loadQueueData(force = false) {
                 };
             }
             else if (data.type === 'videos') {
-                for (const v of data.videos) {
-                    if (!state.queueIndex.has(v.id)) state.queue.push(v);
+                for (const v of (data.videos || [])) {
+                    if (v && v.id && !state.queueIndex.has(v.id)) {
+                        state.queue.push(v);
+                        state.queueIndex.set(v.id, state.queue.length - 1);
+                    }
                 }
-                state.queue.sort((a, b) => new Date(b.publishedAt) - new Date(a.publishedAt));
+                state.queue.sort((a, b) => {
+                    const tA = new Date(a.publishedAt).getTime();
+                    const tB = new Date(b.publishedAt).getTime();
+                    return (isNaN(tB) ? 0 : tB) - (isNaN(tA) ? 0 : tA);
+                });
                 rebuildQueueIndex();
                 renderQueue();
             }
             else if (data.type === 'error') {
                 showNotification(data.message);
                 es.close();
+                state.syncEventSource = null;
                 DOM.syncBtn.textContent = 'Sync';
+                renderQueue();
             }
             else if (data.type === 'done') {
                 es.close();
+                state.syncEventSource = null;
                 if (force) {
                     DOM.syncBtn.textContent = '✓';
                     setTimeout(() => { DOM.syncBtn.textContent = 'Sync'; }, 2000);
@@ -157,15 +173,18 @@ export function loadQueueData(force = false) {
         } catch (err) {
             console.error('SSE parse error:', err);
             es.close();
+            state.syncEventSource = null;
             DOM.syncBtn.textContent = 'Sync';
+            renderQueue();
         }
     };
 
     es.onerror = () => {
         es.close();
+        state.syncEventSource = null;
         showNotification('Error loading video queue. Check console.');
         DOM.syncBtn.textContent = 'Sync';
-        if (state.queue.length === 0) DOM.queueList.innerHTML = '';
+        renderQueue();
     };
 }
 
@@ -173,6 +192,7 @@ export function loadQueueData(force = false) {
 
 function _scrollToCurrent() {
     if (!state.currentPlayingId) return;
-    const el = document.querySelector(`.video-item[data-id="${state.currentPlayingId}"]`);
+    const cleanId = CSS.escape(state.currentPlayingId);
+    const el = document.querySelector(`.video-item[data-id="${cleanId}"]`);
     if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }

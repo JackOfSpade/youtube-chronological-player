@@ -67,6 +67,7 @@ export const state = {
     /** @type {Array<{id: string, name: string}>} */
     settingsChannels: [],
     searchTimeout: null,
+    syncEventSource: null,
 };
 
 // ── Queue index helpers ────────────────────────────────────────────────────
@@ -96,8 +97,13 @@ const _escapeEl = document.createElement('span');
 
 /** Escape a string for safe insertion into innerHTML. */
 export function escapeHTML(str) {
-    _escapeEl.textContent = str;
-    return _escapeEl.innerHTML;
+    if (str == null) return '';
+    return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#39;');
 }
 
 /**
@@ -105,35 +111,47 @@ export function escapeHTML(str) {
  * while preserving safe formatting tags used by YouTube (b, i, a, br, etc.).
  */
 const _ALLOWED_TAGS = new Set(['b', 'i', 'em', 'strong', 'a', 'br', 'p', 'ul', 'ol', 'li', 'span']);
-const _sanitizeDiv = document.createElement('div');
 
 export function sanitizeHTML(html) {
-    _sanitizeDiv.innerHTML = html;
-    // Remove dangerous elements
-    for (const el of _sanitizeDiv.querySelectorAll('script, iframe, object, embed, form, style, link, meta, base')) {
-        el.remove();
-    }
-    // Strip event-handler attributes and srcdoc from all remaining elements
-    for (const el of _sanitizeDiv.querySelectorAll('*')) {
+    if (!html) return '';
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const root = doc.body;
+
+    // Only allow tags in _ALLOWED_TAGS list
+    for (const el of root.querySelectorAll('*')) {
+        if (!_ALLOWED_TAGS.has(el.tagName.toLowerCase())) {
+            el.remove();
+            continue;
+        }
+
+        // Strip event-handler attributes, srcdoc, and style from all remaining elements
         for (const attr of [...el.attributes]) {
-            if (attr.name.startsWith('on') || attr.name === 'srcdoc') {
+            if (attr.name.startsWith('on') || attr.name === 'srcdoc' || attr.name === 'style') {
                 el.removeAttribute(attr.name);
             }
         }
         // Force links to open in new tab and prevent tabnapping
         if (el.tagName === 'A') {
-            el.setAttribute('target', '_blank');
-            el.setAttribute('rel', 'noopener noreferrer');
+            const href = (el.getAttribute('href') || '').toLowerCase().trim();
+            if (href && !href.startsWith('http://') && !href.startsWith('https://') && !href.startsWith('mailto:')) {
+                el.removeAttribute('href');
+            } else {
+                el.setAttribute('target', '_blank');
+                el.setAttribute('rel', 'noopener noreferrer');
+            }
         }
     }
-    return _sanitizeDiv.innerHTML;
+    return root.innerHTML;
 }
 
 const _dateOpts = { month: 'short', day: 'numeric', year: 'numeric' };
 
 /** Format an ISO date string into a short locale string. */
 export function formatDate(isoStr) {
-    return new Date(isoStr).toLocaleDateString(undefined, _dateOpts);
+    if (!isoStr) return '';
+    const d = new Date(isoStr);
+    if (isNaN(d.getTime())) return '';
+    return d.toLocaleDateString(undefined, _dateOpts);
 }
 
 // ── Notification helpers ───────────────────────────────────────────────────

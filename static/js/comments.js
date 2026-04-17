@@ -7,7 +7,8 @@ import { DOM, state, escapeHTML, formatDate, sanitizeHTML } from './state.js';
 // ── Public API ─────────────────────────────────────────────────────────────
 
 export async function loadComments(videoId, append = false) {
-    if (!DOM.commentsSection || state.isFetchingComments) return;
+    if (!DOM.commentsSection) return;
+    if (append && state.isFetchingComments) return;
 
     state.isFetchingComments = true;
     DOM.commentsSection.classList.remove('hidden');
@@ -23,13 +24,17 @@ export async function loadComments(videoId, append = false) {
     }
 
     try {
-        let url = `/api/comments/${videoId}`;
+        let url = `/api/comments/${encodeURIComponent(videoId)}`;
         if (append && state.commentsToken) {
-            url += `?pageToken=${state.commentsToken}`;
+            url += `?pageToken=${encodeURIComponent(state.commentsToken)}`;
         }
 
         const resp = await fetch(url);
+        if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
         const data = await resp.json();
+
+        if (state.currentPlayingId !== videoId) return; // Prevent rendering if navigated away
+
         state.commentsToken = data.nextPageToken || null;
 
         const loader = document.getElementById('comments-loading-more');
@@ -37,17 +42,25 @@ export async function loadComments(videoId, append = false) {
 
         _renderComments(data.comments, videoId, append);
     } catch (err) {
+        if (state.currentPlayingId !== videoId) return;
+
+        const loader = document.getElementById('comments-loading-more');
+        if (loader) loader.remove();
+
         if (!append) {
             DOM.commentsContainer.innerHTML = '<div class="comments-status comments-error">Failed to load comments</div>';
         }
         console.error(err);
     } finally {
-        state.isFetchingComments = false;
+        if (state.currentPlayingId === videoId) {
+            state.isFetchingComments = false;
+        }
     }
 }
 
 /** Toggle visibility of a reply thread. Called from inline onclick. */
-window.toggleReplies = function (btn, threadId) {
+window.toggleReplies = function (btn) {
+    const threadId = btn.dataset.thread;
     const div = document.getElementById(`replies-${threadId}`);
     if (!div) return;
     const isHidden = div.classList.toggle('hidden');
@@ -59,7 +72,7 @@ window.toggleReplies = function (btn, threadId) {
 // ── Private ────────────────────────────────────────────────────────────────
 
 function _renderComments(comments, videoId, append) {
-    if (!comments || comments.length === 0) {
+    if (!Array.isArray(comments) || comments.length === 0) {
         if (!append) DOM.commentsContainer.innerHTML = '<div class="comments-status">No comments found.</div>';
         return;
     }
@@ -72,7 +85,7 @@ function _renderComments(comments, videoId, append) {
 
         let repliesHTML = '';
         if (c.replies && c.replies.length > 0) {
-            const sorted = [...c.replies].reverse();
+            const sorted = [...(c.replies || [])].reverse();
             const items = sorted.map(r => `
                 <div class="comment-reply">
                     <img src="${escapeHTML(r.avatar)}" class="comment-avatar comment-avatar--reply" loading="lazy">
@@ -84,15 +97,15 @@ function _renderComments(comments, videoId, append) {
                         <div class="comment-text">${sanitizeHTML(r.text)}</div>
                         <div class="comment-actions">
                             <span class="comment-meta">👍 ${r.likeCount}</span>
-                            <a href="https://www.youtube.com/watch?v=${videoId}&lc=${r.id}#comments" target="_blank" class="comment-reply-link">Reply</a>
+                            <a href="https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&lc=${encodeURIComponent(r.id)}#comments" target="_blank" class="comment-reply-link">Reply</a>
                         </div>
                     </div>
                 </div>
             `).join('');
 
             repliesHTML = `
-                <button onclick="toggleReplies(this, '${c.id}')" data-count="${c.replies.length}" class="toggle-replies-btn">▼ View ${c.replies.length} replies</button>
-                <div id="replies-${c.id}" class="replies hidden">${items}</div>
+                <button onclick="toggleReplies(this)" data-thread="${escapeHTML(c.id)}" data-count="${c.replies.length}" class="toggle-replies-btn">▼ View ${c.replies.length} replies</button>
+                <div id="replies-${escapeHTML(c.id)}" class="replies hidden">${items}</div>
             `;
         }
 
@@ -107,7 +120,7 @@ function _renderComments(comments, videoId, append) {
                     <div class="comment-text">${sanitizeHTML(c.text)}</div>
                     <div class="comment-actions">
                         <span class="comment-meta">👍 ${c.likeCount}</span>
-                        <a href="https://www.youtube.com/watch?v=${videoId}&lc=${c.id}#comments" target="_blank" class="comment-reply-link">Reply</a>
+                        <a href="https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&lc=${encodeURIComponent(c.id)}#comments" target="_blank" class="comment-reply-link">Reply</a>
                     </div>
                 </div>
             </div>

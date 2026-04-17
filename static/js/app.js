@@ -16,13 +16,17 @@ import {
 
 function init() {
     // ── Responsive queue sizing ────────────────────────────────────────
-    window.addEventListener('resize', resizeQueue);
+    let resizeTimer;
+    window.addEventListener('resize', () => {
+        clearTimeout(resizeTimer);
+        resizeTimer = setTimeout(resizeQueue, 150);
+    });
     setTimeout(resizeQueue, 100);
 
     // ── Infinite-scroll for comments ───────────────────────────────────
-    window.addEventListener('scroll', () => {
+    DOM.commentsSection.addEventListener('scroll', () => {
         if (!state.currentPlayingId || !state.commentsToken || state.isFetchingComments) return;
-        const dist = document.documentElement.scrollHeight - window.scrollY - window.innerHeight;
+        const dist = DOM.commentsSection.scrollHeight - DOM.commentsSection.scrollTop - DOM.commentsSection.clientHeight;
         if (dist < 300) loadComments(state.currentPlayingId, true);
     });
 
@@ -55,8 +59,20 @@ function init() {
 
     // ── Search autocomplete ────────────────────────────────────────────
     DOM.channelInput.addEventListener('input', handleSearchInput);
+    DOM.channelInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            e.preventDefault();
+            handleAddChannel();
+        }
+    });
     document.addEventListener('click', (e) => {
-        if (!e.target.closest('.add-channel-form')) DOM.searchDropdown.classList.add('hidden');
+        if (!e.target.closest('.add-channel-form')) {
+            DOM.searchDropdown.classList.add('hidden');
+            if (state.searchTimeout) {
+                clearTimeout(state.searchTimeout);
+                state.searchTimeout = null;
+            }
+        }
     });
 }
 

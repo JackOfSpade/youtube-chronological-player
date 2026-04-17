@@ -17,6 +17,32 @@ logger = logging.getLogger(__name__)
 
 # ── Low-level request wrapper ───────────────────────────────────────────────
 
+def _safe_dict_get(data, *keys):
+    """Safely traverse nested dictionaries, guaranteeing a dict return."""
+    current = data
+    for key in keys:
+        if isinstance(current, dict):
+            current = current.get(key)
+        else:
+            return {}
+    return current if isinstance(current, dict) else {}
+
+
+def _parse_iso_datetime(date_str, default_min=False):
+    """Parse an ISO date string into a UTC-aware datetime."""
+    if not date_str:
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc) if default_min else None
+    if isinstance(date_str, str) and len(date_str) > 100:
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc) if default_min else None
+    try:
+        dt = dateutil_parser.parse(str(date_str))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=datetime.timezone.utc)
+        return dt
+    except (ValueError, TypeError, OverflowError):
+        return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc) if default_min else None
+
+
 def _api_get(url, params=None, session=None):
     """Perform a GET with timeout.  Returns parsed JSON or {} on failure."""
     requester = session or requests
@@ -24,7 +50,7 @@ def _api_get(url, params=None, session=None):
         resp = requester.get(url, params=params, timeout=cfg.API_TIMEOUT)
         resp.raise_for_status()
         return resp.json()
-    except requests.RequestException as exc:
+    except (requests.RequestException, ValueError, TypeError) as exc:
         logger.warning("YouTube API request failed: %s — %s", url, exc)
         return {}
 
@@ -39,8 +65,9 @@ def get_uploads_playlist_id(channel_id, api_key, session=None):
         session=session,
     )
     items = data.get('items')
-    if items:
-        return items[0]['contentDetails']['relatedPlaylists']['uploads']
+    if isinstance(items, list) and items and isinstance(items[0], dict):
+        upl = _safe_dict_get(items[0], 'contentDetails', 'relatedPlaylists').get('uploads')
+        return str(upl) if isinstance(upl, (str, int)) else None
     return None
 
 
@@ -54,13 +81,18 @@ def search_channels(query, api_key):
         params={'part': 'snippet', 'type': 'channel', 'q': query, 'maxResults': 5, 'key': api_key},
     )
 
+    items = data.get('items')
+    if not isinstance(items, list):
+        items = []
+
     return [
         {
-            'channelId': item['snippet']['channelId'],
-            'title': item['snippet']['title'],
-            'thumbnail': _get_thumbnail_url(item['snippet']),
+            'channelId': str(item['snippet']['channelId']),
+            'title': str(item['snippet'].get('title') or ''),
+            'thumbnail': str(_get_thumbnail_url(item['snippet'])),
         }
-        for item in data.get('items', [])
+        for item in items
+        if isinstance(item, dict) and isinstance(item.get('snippet'), dict) and isinstance(item['snippet'].get('channelId'), (str, int)) and item['snippet'].get('channelId')
     ]
 
 
@@ -73,11 +105,11 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
     """
     videos = []
     next_page_token = ""
-    start_dt = dateutil_parser.parse(start_date_iso)
-    if start_dt.tzinfo is None:
-        start_dt = start_dt.replace(tzinfo=datetime.timezone.utc)
+    start_dt = _parse_iso_datetime(start_date_iso, default_min=True)
 
-    while True:
+    page_count = 0
+    while page_count < 10:
+        page_count += 1
         params = {
             'part': 'snippet',
             'maxResults': 50,
@@ -93,24 +125,34 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
             session=session,
         )
         items = data.get('items')
-        if not items:
+        if not items or not isinstance(items, list):
             break
 
         oldest_in_batch = None
         for item in items:
-            snippet = item['snippet']
-            pub_dt = dateutil_parser.parse(snippet['publishedAt'])
+            if not isinstance(item, dict):
+                continue
+            snippet = item.get('snippet')
+            if not isinstance(snippet, dict) or 'publishedAt' not in snippet:
+                continue
+            
+            pub_dt = _parse_iso_datetime(snippet['publishedAt'])
+            if pub_dt is None:
+                continue
 
             if pub_dt >= start_dt:
-                title = snippet.get('title', '')
+                title = snippet.get('title') or ''
+                video_id = _safe_dict_get(snippet, 'resourceId').get('videoId', '')
+                if not isinstance(video_id, (str, int)) or not video_id:
+                    continue
                 if title not in ('Private video', 'Deleted video'):
                     videos.append({
-                        'id': snippet['resourceId']['videoId'],
-                        'title': title,
-                        'channelTitle': snippet.get('channelTitle', ''),
-                        'channelId': snippet.get('channelId', ''),
-                        'publishedAt': snippet['publishedAt'],
-                        'thumbnail': _get_thumbnail_url(snippet),
+                        'id': str(video_id),
+                        'title': str(title),
+                        'channelTitle': str(snippet.get('channelTitle') or ''),
+                        'channelId': str(snippet.get('channelId') or ''),
+                        'publishedAt': str(snippet['publishedAt']),
+                        'thumbnail': str(_get_thumbnail_url(snippet)),
                     })
             oldest_in_batch = pub_dt
 
@@ -144,13 +186,20 @@ def fetch_video_comments(video_id, api_key, page_token=None):
 
     data = _api_get("https://www.googleapis.com/youtube/v3/commentThreads", params=params)
 
+    items = data.get('items')
+    if not isinstance(items, list):
+        items = []
+
     comments_list = []
-    for item in data.get('items', []):
-        top_snippet = item['snippet']['topLevelComment']['snippet']
-        comment_obj = _parse_comment(top_snippet, item['id'])
+    for item in items:
+        if not isinstance(item, dict): continue
+        top_snippet = _safe_dict_get(item, 'snippet', 'topLevelComment', 'snippet')
+        comment_obj = _parse_comment(top_snippet, item.get('id') if isinstance(item.get('id'), (str, int)) else '')
+        raw_comments = _safe_dict_get(item, 'replies').get('comments')
         comment_obj['replies'] = [
-            _parse_comment(r['snippet'], r['id'])
-            for r in item.get('replies', {}).get('comments', [])
+            _parse_comment(_safe_dict_get(r, 'snippet'), r.get('id') if isinstance(r.get('id'), (str, int)) else '')
+            for r in (raw_comments if isinstance(raw_comments, list) else [])
+            if isinstance(r, dict)
         ]
         comments_list.append(comment_obj)
 
@@ -160,21 +209,36 @@ def fetch_video_comments(video_id, api_key, page_token=None):
 # ── Private helpers ─────────────────────────────────────────────────────────
 
 def _get_thumbnail_url(snippet):
-    thumbnails = snippet.get('thumbnails', {})
-    return thumbnails.get('medium', thumbnails.get('default', {})).get('url', '')
+    if not snippet: return ''
+    thumbnails = _safe_dict_get(snippet, 'thumbnails')
+    url = _safe_dict_get(thumbnails, 'medium').get('url') or _safe_dict_get(thumbnails, 'default').get('url', '')
+    if url and not isinstance(url, str): return ''
+    if url and not (url.startswith('http://') or url.startswith('https://')): return ''
+    return url or ''
 
 
 def _parse_comment(snippet, comment_id):
+    avatar = snippet.get('authorProfileImageUrl') or ''
+    if avatar and not isinstance(avatar, str): avatar = ''
+    if avatar and not (avatar.startswith('http://') or avatar.startswith('https://')): avatar = ''
+    
+    try:
+        like_count = int(snippet.get('likeCount') or 0)
+    except (ValueError, TypeError):
+        like_count = 0
+
     return {
-        'id': comment_id,
-        'author': snippet.get('authorDisplayName', 'Unknown'),
-        'avatar': snippet.get('authorProfileImageUrl', ''),
-        'text': snippet.get('textDisplay', ''),
-        'publishedAt': snippet.get('publishedAt', ''),
-        'likeCount': snippet.get('likeCount', 0),
+        'id': str(comment_id),
+        'author': str(snippet.get('authorDisplayName') or 'Unknown'),
+        'avatar': str(avatar),
+        'text': str(snippet.get('textDisplay') or ''),
+        'publishedAt': str(snippet.get('publishedAt') or ''),
+        'likeCount': like_count,
     }
 
 
 def sort_videos_newest_first(videos):
     """Sort a video list in-place by publishedAt, newest first."""
-    videos.sort(key=lambda v: dateutil_parser.parse(v['publishedAt']), reverse=True)
+    if not isinstance(videos, list):
+        return
+    videos.sort(key=lambda v: _parse_iso_datetime(v.get('publishedAt', '') if isinstance(v, dict) else '', default_min=True), reverse=True)

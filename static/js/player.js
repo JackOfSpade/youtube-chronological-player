@@ -17,6 +17,9 @@ if (window.YT && window.YT.Player) {
     window.onYouTubeIframeAPIReady = function () {
         state.isPlayerReady = true;
         if (typeof _prev === 'function') _prev();
+        if (state.currentPlayingId && !state.ytPlayer) {
+            playVideo(state.currentPlayingId);
+        }
     };
 }
 
@@ -26,7 +29,7 @@ export function playVideo(videoId, globalIndex) {
     // Mark outgoing video as watched
     if (state.currentPlayingId && state.currentPlayingId !== videoId) {
         if (!state.watchHistory.watched_video_ids.has(state.currentPlayingId)) {
-            navigator.sendBeacon(`/api/watched/${state.currentPlayingId}`);
+            navigator.sendBeacon(`/api/watched/${encodeURIComponent(state.currentPlayingId)}`);
             state.watchHistory.watched_video_ids.add(state.currentPlayingId);
             state.watchHistory.last_watched_video_id = state.currentPlayingId;
         }
@@ -51,14 +54,24 @@ export function playVideo(videoId, globalIndex) {
                 width: '100%',
                 videoId,
                 playerVars: { autoplay: 1, controls: 1, rel: 0 },
-                events: { onStateChange: _onStateChange },
+                events: { 
+                    onReady: (event) => {
+                        if (state.currentPlayingId && state.currentPlayingId !== videoId) {
+                            event.target.loadVideoById(state.currentPlayingId);
+                        }
+                    },
+                    onStateChange: _onStateChange,
+                    onError: _onError
+                },
             });
             DOM.ytPlayer.style.zIndex = '10';
         } else {
             console.warn('YouTube API not ready yet.');
         }
     } else {
-        state.ytPlayer.loadVideoById(videoId);
+        if (typeof state.ytPlayer.loadVideoById === 'function') {
+            state.ytPlayer.loadVideoById(videoId);
+        }
     }
 }
 
@@ -85,7 +98,7 @@ function _updateInfoPanel(videoId) {
     DOM.videoDate.textContent = formatDate(video.publishedAt);
 
     if (DOM.commentBtn) {
-        DOM.commentBtn.href = `https://www.youtube.com/watch?v=${videoId}#comments`;
+        DOM.commentBtn.href = `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}#comments`;
     }
 
     loadComments(videoId);
@@ -96,21 +109,25 @@ function _onStateChange(event) {
     if (event.data === 0) _handleEnded(state.currentPlayingId);
 }
 
-async function _handleEnded(videoId) {
-    try {
-        await fetch(`/api/watched/${videoId}`, { method: 'POST' });
-        state.watchHistory.watched_video_ids.add(videoId);
-        state.watchHistory.last_watched_video_id = videoId;
+function _onError(event) {
+    console.warn('YouTube Player Error:', event.data, 'Skipping video...');
+    _handleEnded(state.currentPlayingId);
+}
 
-        const next = findOldestUnwatchedIndex();
-        if (next !== -1) {
-            playVideo(state.queue[next].id, next);
-        } else {
-            renderQueue();
-            updateResumeButton();
-        }
-    } catch (err) {
+function _handleEnded(videoId) {
+    fetch(`/api/watched/${encodeURIComponent(videoId)}`, { method: 'POST' }).catch(err => {
         console.error('Failed to mark video as watched', err);
+    });
+
+    state.watchHistory.watched_video_ids.add(videoId);
+    state.watchHistory.last_watched_video_id = videoId;
+
+    const next = findOldestUnwatchedIndex();
+    if (next !== -1) {
+        playVideo(state.queue[next].id, next);
+    } else {
+        renderQueue();
+        updateResumeButton();
     }
 }
 
@@ -118,6 +135,6 @@ async function _handleEnded(videoId) {
 
 window.addEventListener('beforeunload', () => {
     if (state.currentPlayingId && !state.watchHistory.watched_video_ids.has(state.currentPlayingId)) {
-        navigator.sendBeacon(`/api/watched/${state.currentPlayingId}`);
+        navigator.sendBeacon(`/api/watched/${encodeURIComponent(state.currentPlayingId)}`);
     }
 });

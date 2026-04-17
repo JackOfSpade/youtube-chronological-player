@@ -7,6 +7,8 @@ import { loadQueueData, renderQueue, updateResumeButton } from './queue.js';
 
 // ── Public API ─────────────────────────────────────────────────────────────
 
+let _lastSearchQuery = null;
+
 export function openSettingsModal() {
     DOM.settingsModal.classList.remove('hidden');
     _fetchChannelConfig();
@@ -14,6 +16,11 @@ export function openSettingsModal() {
 
 export function closeSettingsModal() {
     DOM.settingsModal.classList.add('hidden');
+    if (state.searchTimeout) {
+        clearTimeout(state.searchTimeout);
+        state.searchTimeout = null;
+    }
+    _lastSearchQuery = null;
 }
 
 export function handleAddChannel() {
@@ -27,24 +34,36 @@ export function handleAddChannel() {
 
 export function handleSearchInput(e) {
     const q = e.target.value.trim();
-    if (!q) { DOM.searchDropdown.classList.add('hidden'); return; }
+    if (!q) { 
+        DOM.searchDropdown.classList.add('hidden'); 
+        if (state.searchTimeout) {
+            clearTimeout(state.searchTimeout);
+            state.searchTimeout = null;
+        }
+        return; 
+    }
     if (state.searchTimeout) clearTimeout(state.searchTimeout);
     state.searchTimeout = setTimeout(() => _search(q), 800);
 }
 
 export async function saveChannels() {
+    if (DOM.saveChannelsBtn.textContent === 'Saving...') return;
     DOM.saveChannelsBtn.textContent = 'Saving...';
     try {
-        await fetch('/api/channels', {
+        const res = await fetch('/api/channels', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ channels: state.settingsChannels }),
         });
+        if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.message || 'Failed to save channels');
+        }
         closeSettingsModal();
         loadQueueData(true);
     } catch (e) {
         console.error(e);
-        showNotification('Failed to save channels');
+        showNotification(e.message || 'Failed to save channels');
     } finally {
         DOM.saveChannelsBtn.textContent = 'Save & Sync';
     }
@@ -55,9 +74,14 @@ export async function saveChannels() {
 async function _fetchChannelConfig() {
     try {
         const res = await fetch('/api/config');
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const data = await res.json();
         const raw = data.channels || [];
-        state.settingsChannels = raw.map(c => typeof c === 'string' ? { id: c, name: c } : c);
+        state.settingsChannels = raw.map(c => {
+            if (typeof c === 'string') return { id: c, name: c };
+            if (!c || typeof c !== 'object') return { id: '', name: '' };
+            return { id: String(c.id || c.name || ''), name: String(c.name || c.id || '') };
+        }).filter(c => c.id);
         _renderChannels();
     } catch (e) {
         console.error(e);
@@ -109,16 +133,21 @@ DOM.channelList.addEventListener('click', (e) => {
     updateResumeButton();
 });
 
+
 async function _search(query) {
+    _lastSearchQuery = query;
     DOM.searchDropdown.innerHTML = '<div class="search-status">Searching...</div>';
     DOM.searchDropdown.classList.remove('hidden');
 
     try {
         const res = await fetch(`/api/search_channels?q=${encodeURIComponent(query)}`);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
         const results = await res.json();
+        if (_lastSearchQuery !== query) return;
 
         const existing = new Set(state.settingsChannels.map(c => c.id));
-        const filtered = results.filter(ch => !existing.has(ch.channelId));
+        const validResults = Array.isArray(results) ? results : [];
+        const filtered = validResults.filter(ch => ch && !existing.has(ch.channelId));
 
         DOM.searchDropdown.innerHTML = '';
         if (filtered.length === 0) {
@@ -146,6 +175,7 @@ async function _search(query) {
         });
         DOM.searchDropdown.appendChild(frag);
     } catch (e) {
+        if (_lastSearchQuery !== query) return;
         console.error('Search failed', e);
         DOM.searchDropdown.innerHTML = '<div class="search-status search-error">Search failed</div>';
     }

@@ -6,6 +6,7 @@ representative video when multiple channels cover the same news story.
 """
 
 import os
+import re
 import json
 import logging
 import concurrent.futures
@@ -34,35 +35,41 @@ except Exception:
     client = None
 
 
-# ── Shared response schema ───────────────────────────────────────────────────
-# Both filter functions return the same shape: {"video_ids": ["id1", "id2", ...]}
-# Declaring this as a response_schema enforces it at the token-sampling level —
-# Gemini cannot output anything that doesn't match this structure.
 
-_VIDEO_IDS_SCHEMA = types.Schema(
-    type=types.Type.OBJECT,
-    properties={
-        "video_ids": types.Schema(
-            type=types.Type.ARRAY,
-            items=types.Schema(type=types.Type.STRING),
-        )
-    },
-    required=["video_ids"],
-)
 
 
 def get_video_transcript(video_id):
     """Fetch the first ~1000 chars of an English transcript, or a placeholder."""
+    if not video_id or video_id == 'unknown':
+        return "<No transcript available>"
+    
     try:
         ytt_api = YouTubeTranscriptApi()
         transcript_list = ytt_api.list(video_id)
-        transcript = transcript_list.find_transcript(['en'])
+        try:
+            transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+        except Exception:
+            transcript = next(iter(transcript_list))
         data = transcript.fetch()
-        text = " ".join([t['text'] for t in data])
+        text = " ".join([t.get('text', '') for t in data if isinstance(t, dict)])
         return text[:1000]
     except Exception:
-        logger.debug("Transcript fetch failed for %s", video_id, exc_info=True)
+        logger.debug("Transcript fetch failed for %s", video_id)
         return "<No transcript available>"
+
+
+def _extract_json_from_text(text):
+    """Safely extract JSON from Gemini markdown responses."""
+    if "```json" in text.lower():
+        match = re.search(r'```json\s*(.*?)\s*```', text, flags=re.DOTALL | re.IGNORECASE)
+        if match: return match.group(1).strip()
+    elif "```" in text:
+        match = re.search(r'```\s*(.*?)\s*```', text, flags=re.DOTALL)
+        if match: return match.group(1).strip()
+    else:
+        match = re.search(r'\{.*\}', text, flags=re.DOTALL)
+        if match: return match.group(0).strip()
+    return text
 
 
 def filter_videos(videos):
@@ -97,22 +104,41 @@ def filter_videos(videos):
     # Limit max workers to 15 to avoid YouTube throwing aggressive rate limits on transcript API
     max_workers = min(15, len(videos))
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_video = {executor.submit(get_video_transcript, v['id']): v for v in videos}
-        for future in concurrent.futures.as_completed(future_to_video):
-            v = future_to_video[future]
-            try:
-                snippet = future.result()
-            except Exception:
-                logger.exception("Transcript parallel fetch failed for video %s", v['id'])
-                snippet = "<No transcript available>"
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    future_to_video = {}
+    try:
+        future_to_video = {executor.submit(get_video_transcript, v.get('id') or 'unknown'): v for v in videos if isinstance(v, dict) and v.get('id')}
+        processed_vids = set()
+        try:
+            for future in concurrent.futures.as_completed(future_to_video, timeout=25):
+                v = future_to_video[future]
+                processed_vids.add(v.get('id', ''))
+                try:
+                    snippet = future.result()
+                except Exception:
+                    logger.exception("Transcript parallel fetch failed for video %s", v['id'])
+                    snippet = "<No transcript available>"
 
-            video_metadata.append({
-                "id": v['id'],
-                "title": v["title"],
-                "channelTitle": v["channelTitle"],
-                "transcript_snippet": snippet,
-            })
+                video_metadata.append({
+                    "id": v.get('id', ''),
+                    "title": v.get("title", ""),
+                    "channelTitle": v.get("channelTitle", ""),
+                    "transcript_snippet": snippet,
+                })
+        except concurrent.futures.TimeoutError:
+            logger.warning("Transcript fetching timed out globally, proceeding with acquired data.")
+            for f, v in future_to_video.items():
+                if v.get('id', '') not in processed_vids:
+                    video_metadata.append({
+                        "id": v.get('id', ''),
+                        "title": v.get("title", ""),
+                        "channelTitle": v.get("channelTitle", ""),
+                        "transcript_snippet": "<No transcript available (timeout)>",
+                    })
+    finally:
+        for f in future_to_video:
+            f.cancel()
+        executor.shutdown(wait=False)
 
     try:
         response = client.models.generate_content(
@@ -121,14 +147,30 @@ def filter_videos(videos):
             config=types.GenerateContentConfig(
                 tools=[{"google_search": {}}],
                 temperature=0.1,
-                response_mime_type="application/json",
             ),
         )
 
-        kept_ids = json.loads(response.text).get("video_ids", [])
-        kept_set = set(kept_ids)
+        try:
+            text = response.text.strip()
+            text = _extract_json_from_text(text)
+        except ValueError:
+            logger.warning("Gemini Safety Filter blocked prompt payload correctly dropping to empty responses.")
+            text = "{}"
 
-        filtered = [v for v in videos if v['id'] in kept_set]
+        try:
+            parsed = json.loads(text)
+            if not isinstance(parsed, dict):
+                parsed = {}
+        except Exception:
+            parsed = {}
+
+        kept_ids = parsed.get("video_ids", [])
+        if not isinstance(kept_ids, list):
+            kept_ids = []
+
+        kept_set = set(str(v) for v in kept_ids if isinstance(v, (str, int, float, bool)))
+
+        filtered = [v for v in videos if isinstance(v, dict) and str(v.get('id')) in kept_set]
 
         removed = len(videos) - len(filtered)
         logger.info("AI filter: %d input → %d kept (%d duplicates removed)", len(videos), len(filtered), removed)
@@ -200,12 +242,12 @@ list — never invent IDs.
         "watched_video_ids": watched_ids,
         "candidate_videos": [
             {
-                "id": v["id"],
+                "id": v.get("id", ""),
                 "title": v.get("title", ""),
                 "channelTitle": v.get("channelTitle", ""),
                 "publishedAt": v.get("publishedAt", ""),
             }
-            for v in candidate_videos
+            for v in candidate_videos if isinstance(v, dict)
         ],
     }
 
@@ -216,13 +258,30 @@ list — never invent IDs.
             config=types.GenerateContentConfig(
                 tools=[{"google_search": {}}],
                 temperature=0.1,
-                response_mime_type="application/json",
             ),
         )
 
-        truly_new_ids = set(json.loads(response.text).get("video_ids", []))
+        try:
+            text = response.text.strip()
+            text = _extract_json_from_text(text)
+        except ValueError:
+            logger.warning("Gemini Safety Filter blocked prompt payload correctly dropping to empty responses.")
+            text = "{}"
 
-        result = [v for v in candidate_videos if v['id'] in truly_new_ids]
+        try:
+            parsed = json.loads(text)
+            if not isinstance(parsed, dict):
+                parsed = {}
+        except Exception:
+            parsed = {}
+
+        v_ids = parsed.get("video_ids", [])
+        if not isinstance(v_ids, list):
+            v_ids = []
+
+        truly_new_ids = set(str(v) for v in v_ids if isinstance(v, (str, int, float, bool)))
+
+        result = [v for v in candidate_videos if isinstance(v, dict) and str(v.get('id')) in truly_new_ids]
 
         removed = len(candidate_videos) - len(result)
         logger.info(
@@ -230,11 +289,8 @@ list — never invent IDs.
             len(candidate_videos), len(result), removed,
         )
 
-        # Safety: if Gemini nukes everything, fall back to all candidates
-        if not result and candidate_videos:
-            logger.warning("Already-watched check removed all candidates; falling back.")
-            return candidate_videos
-
+        # Legitimate 0-length results indicate all candidate videos are already-watched.
+        # We do not fall back here, as returning [] is the correct intent for full-duplicate batches.
         return result
 
     except Exception:

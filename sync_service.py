@@ -29,9 +29,12 @@ def get_queue(force_sync=False):
     # This reuses the same parallel-fetch, dedup, and AI-filter pipeline.
     videos = []
     for event_str in _fetch_all_videos_stream():
-        data = json.loads(event_str.removeprefix("data: ").strip())
-        if data.get('type') == 'videos':
-            videos = data['videos']
+        try:
+            data = json.loads(event_str.removeprefix("data: ").strip())
+            if data.get('type') == 'videos':
+                videos = data['videos']
+        except json.JSONDecodeError:
+            pass
     return videos
 
 
@@ -40,6 +43,20 @@ def get_queue(force_sync=False):
 def _sse_event(data_dict):
     """Format a dict as a Server-Sent Event data line."""
     return f"data: {json.dumps(data_dict)}\n\n"
+
+
+def _deduplicate_by_id(videos):
+    """Deduplicate a list of videos by their `id` property, preserving order."""
+    deduped = []
+    seen = set()
+    for v in videos:
+        if not isinstance(v, dict):
+            continue
+        vid = v.get('id')
+        if vid and vid not in seen:
+            seen.add(vid)
+            deduped.append(v)
+    return deduped
 
 
 def get_queue_stream(force_sync=False):
@@ -69,6 +86,8 @@ def _fetch_all_videos_stream():
 
     channels = cfg.deduplicate_channels(raw_channels_list)
     if not channels:
+        cfg.save_cache([])
+        yield _sse_event({'type': 'videos', 'videos': []})
         yield _sse_event({'type': 'done', 'message': 'No channels configured'})
         return
 
@@ -87,7 +106,9 @@ def _fetch_all_videos_stream():
     yield _sse_event({'type': 'progress', 'message': f'Syncing {len(channels)} channels in parallel ...'})
 
     max_workers = min(cfg.MAX_PARALLEL_CHANNELS, len(channels))
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    futures = {}
+    try:
         futures = {executor.submit(_process_channel, ch): ch for ch in channels}
         for future in concurrent.futures.as_completed(futures):
             try:
@@ -97,8 +118,19 @@ def _fetch_all_videos_stream():
                     yield _sse_event({'type': 'progress', 'message': f'Finished {ch_name} ...'})
             except Exception as exc:
                 logger.exception("Channel sync failed: %s", exc)
+    finally:
+        for future in futures:
+            future.cancel()
+        executor.shutdown(wait=False)
+
+    # Ensure we deduplicate all videos by their `id` across overlaps to avoid hitting AI with multiple variants of the same object
+    all_videos = _deduplicate_by_id(all_videos)
 
     youtube_api.sort_videos_newest_first(all_videos)
+    
+    # AI Context limit protection. Limit to the absolute newest 500 records mathematically shielding global Gemini text-token ceilings spanning unbounded config lookback loops natively.
+    if len(all_videos) > 500:
+        all_videos = all_videos[:500]
 
     yield _sse_event({'type': 'progress', 'message': 'Analyzing videos with AI ...'})
     filtered_videos = ai_filter.filter_videos(all_videos)
@@ -108,8 +140,8 @@ def _fetch_all_videos_stream():
     watched_ids = storage_manager.get_watched_ids()
     watched_set = set(watched_ids)
 
-    known_watched = [v for v in filtered_videos if v['id'] in watched_set]
-    candidates    = [v for v in filtered_videos if v['id'] not in watched_set]
+    known_watched = [v for v in filtered_videos if v.get('id') in watched_set]
+    candidates    = [v for v in filtered_videos if v.get('id') not in watched_set]
 
     if candidates and watched_ids:
         yield _sse_event({'type': 'progress', 'message': 'Checking watched history with Gemini ...'})
@@ -119,8 +151,15 @@ def _fetch_all_videos_stream():
     # can still render them with the "watched" badge; only the Gemini-confirmed
     # new videos are surfaced as unwatched.
     truly_new = known_watched + candidates
+    youtube_api.sort_videos_newest_first(truly_new)
+
+    truly_new = _deduplicate_by_id(truly_new)
     # ────────────────────────────────────────────────────────────────────────
 
-    cfg.save_cache(truly_new)
+    try:
+        cfg.save_cache(truly_new)
+    except Exception as exc:
+        logger.warning("Failed to save cache: %s", exc)
+
     yield _sse_event({'type': 'videos', 'videos': truly_new})
     yield _sse_event({'type': 'done', 'message': 'Sync complete!'})
