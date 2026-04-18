@@ -13,6 +13,9 @@ import tempfile
 import logging
 import threading
 import copy
+import time
+import errno
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +28,9 @@ _config_lock = threading.Lock()
 CONFIG_FILE = 'config.yaml'
 CACHE_FILE = 'data/cache.json'
 DATA_DIR = 'data'
+
+# Ensure data directory exists on load
+os.makedirs(DATA_DIR, exist_ok=True)
 
 # ── Tuning Constants ────────────────────────────────────────────────────────
 
@@ -39,8 +45,29 @@ _PLACEHOLDER_KEY = "YOUR_YOUTUBE_API_KEY_HERE"
 # ── Atomic I/O ──────────────────────────────────────────────────────────────
 
 def _atomic_write(data, target_path, directory, mode, writer_func):
-    """Write data atomically: tmp-file → fsync → rename."""
+    """Write data atomically: tmp-file → fsync → rename. Protected by a cross-process lock."""
     os.makedirs(directory, exist_ok=True)
+    lock_path = target_path + '.lock'
+    
+    start = time.time()
+    while True:
+        try:
+            fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.close(fd)
+            break
+        except FileExistsError:
+            if time.time() - start > 5:
+                try:
+                    os.remove(lock_path)
+                except OSError:
+                    pass
+            time.sleep(0.1)
+        except OSError as e:
+            if e.errno == errno.EACCES or e.errno == errno.EROFS:
+                logger.error("Permission denied or read-only filesystem while locking %s", target_path)
+                raise
+            break
+
     temp_name = None
     try:
         with tempfile.NamedTemporaryFile(mode, dir=directory, delete=False, suffix='.tmp', encoding='utf-8') as f:
@@ -49,6 +76,23 @@ def _atomic_write(data, target_path, directory, mode, writer_func):
             f.flush()
             os.fsync(f.fileno())
         os.replace(temp_name, target_path)
+    except OSError as e:
+        if e.errno == errno.ENOSPC:
+            logger.error("Disk full (ENOSPC) when writing %s", target_path)
+        elif e.errno == errno.EACCES or e.errno == errno.EROFS:
+            logger.error("Permission error (EACCES) or read-only error (EROFS) when writing %s", target_path)
+        elif e.errno == errno.EXDEV:
+            # Cross-device link; NamedTemporaryFile with dir=directory should prevent this,
+            # but we'll catch it as part of exhausting all stability possibilities.
+            shutil.move(temp_name, target_path)
+            temp_name = None # Mark as handled
+            return
+        if temp_name and os.path.exists(temp_name):
+            try:
+                os.remove(temp_name)
+            except Exception:
+                pass
+        raise
     except Exception:
         if temp_name and os.path.exists(temp_name):
             try:
@@ -56,6 +100,11 @@ def _atomic_write(data, target_path, directory, mode, writer_func):
             except Exception:
                 pass
         raise
+    finally:
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
 
 
 def atomic_write_json(data, target_path, directory=DATA_DIR):
@@ -182,9 +231,14 @@ def get_sync_params():
     lookback = config.get('lookback_hours')
     if lookback is not None:
         try:
+            val = abs(float(lookback))
+            if val == 0:
+                val = DEFAULT_LOOKBACK_HOURS
+            if val > 8760:
+                val = 8760
             start_date = (
                 datetime.datetime.now(datetime.timezone.utc)
-                - datetime.timedelta(hours=abs(float(lookback)))
+                - datetime.timedelta(hours=val)
             ).isoformat()
         except (ValueError, TypeError, OverflowError):
             start_date = (
@@ -203,9 +257,20 @@ def get_sync_params():
     raw_channels = config.get('channels')
     if not isinstance(raw_channels, list):
         raw_channels = []
-    if len(raw_channels) > 500:
-        raw_channels = raw_channels[:500]
-    return config, api_key, start_date, raw_channels
+    
+    # Filter and normalize channels list to ensure no non-dict/non-string items leak through
+    sanitized_channels = []
+    for ch in raw_channels:
+        if isinstance(ch, (str, dict)):
+            # If it's a dict, ensure it has at least an 'id' or 'name'
+            if isinstance(ch, dict) and not (ch.get('id') or ch.get('name')):
+                continue
+            sanitized_channels.append(ch)
+            
+    if len(sanitized_channels) > 500:
+        sanitized_channels = sanitized_channels[:500]
+        
+    return config, api_key, start_date, sanitized_channels
 
 
 # ── Cache ───────────────────────────────────────────────────────────────────
@@ -233,6 +298,11 @@ def load_cache():
         return []
         
     try:
+        # Prevent OOM if CACHE_FILE is unexpectedly massive (e.g. corruption or malicious injection)
+        fsize = os.path.getsize(CACHE_FILE)
+        if fsize > 20 * 1024 * 1024: # 20MB limit for JSON cache
+            logger.error("Cache file is too large (%d bytes), skipping load.", fsize)
+            return []
         current_mtime = os.path.getmtime(CACHE_FILE)
     except Exception:
         return []
@@ -251,9 +321,11 @@ def load_cache():
                 content = f.read(10 * 1024 * 1024)
                 data = json.loads(content)
                 if isinstance(data, list):
-                    _queue_cache = data
+                    # Final sanity check on items
+                    valid_data = [v for v in data if isinstance(v, dict) and v.get('id')]
+                    _queue_cache = valid_data
                     _queue_mtime = current_mtime
-                    return copy.deepcopy(data)
+                    return copy.deepcopy(valid_data)
                 return []
         except Exception:
             return []
@@ -275,7 +347,7 @@ def save_cache(videos):
 # ── Channel helpers ─────────────────────────────────────────────────────────
 
 def normalize_channel_id(channel):
-    """Extract channel ID from either a plain string or a {id, name} dict."""
+    """Extract channel ID from either a plain string or a {id, name} dict. Handles full YouTube URLs."""
     if isinstance(channel, dict):
         val = channel.get('id') or channel.get('name')
     else:
@@ -284,7 +356,19 @@ def normalize_channel_id(channel):
     if not isinstance(val, str):
         return ''
     
-    val = val.strip()[:200]
+    val = val.strip()
+    
+    if val.startswith('http://') or val.startswith('https://'):
+        if '@' in val:
+            val = '@' + val.split('@', 1)[1].split('/')[0].split('?')[0]
+        elif '/channel/' in val:
+            val = val.split('/channel/', 1)[1].split('/')[0].split('?')[0]
+        elif '/c/' in val:
+            val = val.split('/c/', 1)[1].split('/')[0].split('?')[0]
+        elif '/user/' in val:
+            val = val.split('/user/', 1)[1].split('/')[0].split('?')[0]
+
+    val = val[:200]
     return val if val.lower() not in ('none', 'null', 'undefined') else ''
 
 

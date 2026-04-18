@@ -11,7 +11,11 @@ let _lastSearchQuery = null;
 
 export function openSettingsModal() {
     DOM.settingsModal.classList.remove('hidden');
-    _fetchChannelConfig();
+    // Only fetch from server if we don't have a local list yet.
+    // This allows users to toggle the modal without losing unsaved additions.
+    if (!state.settingsChannels || state.settingsChannels.length === 0) {
+        _fetchChannelConfig();
+    }
 }
 
 export function closeSettingsModal() {
@@ -24,7 +28,29 @@ export function closeSettingsModal() {
 }
 
 export function handleAddChannel() {
-    const val = DOM.channelInput.value.trim();
+    let val = DOM.channelInput.value.trim();
+    
+    // Auto-parse URLs if pasted
+    try {
+        if (val.includes('youtube.com/') || val.includes('youtu.be/')) {
+            const url = new URL(val.startsWith('http') ? val : 'https://' + val);
+            if (url.pathname.startsWith('/@')) {
+                val = url.pathname.substring(1).replace(/\/$/, ''); // keeps the @
+            } else if (url.pathname.startsWith('/channel/')) {
+                val = url.pathname.replace('/channel/', '').replace(/\/$/, '');
+            } else if (url.pathname.startsWith('/c/')) {
+                val = url.pathname.replace('/c/', '').replace(/\/$/, '');
+            } else if (url.pathname.startsWith('/user/')) {
+                val = url.pathname.replace('/user/', '').replace(/\/$/, '');
+            }
+        }
+    } catch (e) {
+        // Not a URL, continue with raw value
+    }
+    
+    // Final sanity trim
+    val = val.replace(/\/$/, '');
+    
     if (val && !state.settingsChannels.some(c => c.id === val)) {
         if (state.settingsChannels.length >= 100) {
             showNotification('Maximum of 100 channels allowed.');
@@ -61,10 +87,14 @@ export async function saveChannels() {
             body: JSON.stringify({ channels: state.settingsChannels }),
         });
         if (!res.ok) {
+            if (res.status === 429) throw new Error('Too many requests. Please wait a moment.');
             const err = await res.json().catch(() => ({}));
             throw new Error(err.message || 'Failed to save channels');
         }
         closeSettingsModal();
+        // After successful save, we want to clear our local list so it re-fetches fresh next time
+        // or we could just trust the local state is now synced.
+        // Let's force a reload of the queue.
         loadQueueData(true);
     } catch (e) {
         console.error(e);
@@ -76,7 +106,8 @@ export async function saveChannels() {
 
 // ── Private ────────────────────────────────────────────────────────────────
 
-async function _fetchChannelConfig() {
+async function _fetchChannelConfig(force = false) {
+    if (!force && state.settingsChannels && state.settingsChannels.length > 0) return;
     try {
         const res = await fetch('/api/config');
         if (!res.ok) throw new Error('HTTP ' + res.status);
@@ -170,6 +201,12 @@ async function _search(query) {
     } catch (e) {
         if (_lastSearchQuery !== query) return;
         console.error('Search failed', e);
-        DOM.searchDropdown.innerHTML = '<div class="search-status search-error">Search failed</div>';
+        if (e.message.includes('403') || e.message.includes('Quota')) {
+            DOM.searchDropdown.innerHTML = '<div class="search-status search-error">YouTube Quota Exceeded</div>';
+        } else if (e.message.includes('429') || e.message.includes('Too many requests')) {
+            DOM.searchDropdown.innerHTML = '<div class="search-status search-error">Too many requests. Wait a moment.</div>';
+        } else {
+            DOM.searchDropdown.innerHTML = '<div class="search-status search-error">Search failed</div>';
+        }
     }
 }

@@ -6,11 +6,13 @@ representative video when multiple channels cover the same news story.
 """
 
 import os
-import re
 import json
+import re
 import logging
 import concurrent.futures
 import functools
+import time
+import random
 
 from dotenv import load_dotenv
 from google import genai
@@ -29,11 +31,28 @@ if os.path.exists(_SA_KEY_PATH):
 _PROJECT_ID = os.getenv("GCP_PROJECT_ID", "video-gen-492111")
 _LOCATION = os.getenv("GCP_LOCATION", "us-central1")
 
+# Resolve GEMINI_API_KEY from .env
+gemini_api_key = os.getenv("GEMINI_API_KEY")
+
 try:
-    client = genai.Client(vertexai=True, project=_PROJECT_ID, location=_LOCATION)
+    if gemini_api_key:
+        logger.info("Using standard Google AI API with GEMINI_API_KEY")
+        client = genai.Client(api_key=gemini_api_key)
+        _USE_VERTEX = False
+    else:
+        logger.info("Using Vertex AI with service account: %s", _PROJECT_ID)
+        client = genai.Client(vertexai=True, project=_PROJECT_ID, location=_LOCATION)
+        _USE_VERTEX = True
 except Exception:
     logger.exception("Failed to initialize Gemini client")
     client = None
+    _USE_VERTEX = False
+
+
+# Default model names to try if 404 occurs
+_MODELS_TO_TRY = ["gemini-2.5-flash", "gemini-1.5-flash", "gemini-1.5-flash-001", "gemini-1.5-flash-002"]
+if os.getenv("GEMINI_MODEL"):
+    _MODELS_TO_TRY.insert(0, os.getenv("GEMINI_MODEL"))
 
 
 @functools.lru_cache(maxsize=2000)
@@ -46,49 +65,108 @@ def get_video_transcript(video_id):
         return "<No transcript available>"
     
     try:
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # Add a small jittered sleep to avoid aggressive rate limiting on the transcript API
+        time.sleep(random.uniform(0.1, 0.5))
+        
+        # Retry with exponential backoff on TooManyRequests or similar transient errors
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+                try:
+                    transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
+                except Exception:
+                    transcript = next(iter(transcript_list))
+                data = transcript.fetch()
+                break # Success
+            except Exception as e:
+                err_type = type(e).__name__
+                if "TooManyRequests" in err_type or "TranscriptsDisabled" not in err_type:
+                    if attempt < max_retries - 1:
+                        sleep_time = (2 ** attempt) + random.uniform(0.1, 1.0)
+                        logger.debug("Transcript API transient error for %s (%s). Retrying in %.2fs", video_id, err_type, sleep_time)
+                        time.sleep(sleep_time)
+                        continue
+                raise e # Re-raise if retries exhausted or it's a fatal error
+                
         try:
-            transcript = transcript_list.find_transcript(['en', 'en-US', 'en-GB'])
-        except Exception:
-            transcript = next(iter(transcript_list))
-        data = transcript.fetch()
-        text = " ".join([t.get('text', '') for t in data if isinstance(t, dict)])
-        return text[:1000]
-    except Exception:
-        logger.debug("Transcript fetch failed for %s", video_id)
-        return "<No transcript available>"
+            text = " ".join([str(t.get('text', '')) for t in data if isinstance(t, dict)])
+        except (TypeError, ValueError):
+            text = ""
+            
+        # We cap the returned transcript text to 1000 chars to avoid massive context sizes.
+        return text[:1000] if text else "<No transcript available (empty)>"
+    except Exception as e:
+        err_type = type(e).__name__
+        if "YouTubeTranscriptApi" in err_type or "TranscriptsDisabled" in err_type or "NoTranscriptFound" in err_type:
+             logger.debug("Transcript API error for %s: %s", video_id, err_type)
+        else:
+             logger.debug("Transcript fetch failed for %s: %s", video_id, e)
+        return f"<No transcript available: {err_type}>"
 
 
 def _extract_json_from_text(text):
-    """Safely extract JSON from Gemini markdown responses."""
-    if "```json" in text.lower():
-        match = re.search(r'```json\s*(.*?)\s*```', text, flags=re.DOTALL | re.IGNORECASE)
-        if match: return match.group(1).strip()
-    elif "```" in text:
-        match = re.search(r'```\s*(.*?)\s*```', text, flags=re.DOTALL)
-        if match: return match.group(1).strip()
-    else:
-        match = re.search(r'\{.*\}', text, flags=re.DOTALL)
-        if match: return match.group(0).strip()
+    """Safely extract JSON from Gemini responses."""
+    if not text:
+        return "{}"
+        
+    text = text.strip()
+    
+    # Try to extract from a markdown code block first
+    match = re.search(r'```(?:json)?\s*(.*?)\s*```', text, re.DOTALL)
+    if match:
+        text = match.group(1).strip()
+        
+    # Find the bounds of the outermost JSON object
+    start_idx = text.find('{')
+    end_idx = text.rfind('}')
+    
+    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+        parsed_str = text[start_idx:end_idx+1]
+        try:
+            # Check if it's actually parseable before returning
+            json.loads(parsed_str)
+            return parsed_str
+        except json.JSONDecodeError:
+            # If not parseable, try to fix common issues like missing commas or trailing commas
+            # (Very basic fix for common LLM hiccups)
+            try:
+                # Remove trailing commas before a closing brace/bracket
+                fixed_str = re.sub(r',\s*([\]}])', r'\1', parsed_str)
+                json.loads(fixed_str)
+                return fixed_str
+            except Exception:
+                pass
+            
     return text
 
 
-def filter_videos(videos):
+
+def filter_videos(videos, check_abortion=None):
     """
     Deduplicate *videos* using Gemini with search grounding.
 
-    Returns the filtered list, or the original list unchanged if the AI
-    filter is unavailable or encounters an error.
+    Returns a generator yielding progress dicts and a final 'result' dict, e.g.:
+    {"type": "progress", "message": "..."}
+    {"type": "result", "videos": [...]}
     """
+    if check_abortion and not check_abortion():
+        return
+        
+    yield {"type": "progress", "message": "AI Initialization..."}
+
     if not client:
         logger.warning("No Gemini API key or invalid client, skipping AI filter.")
-        return videos
+        yield {"type": "result", "videos": videos}
+        return
 
     if not videos:
-        return []
+        yield {"type": "result", "videos": []}
+        return
         
     if len(videos) <= 1:
-        return videos
+        yield {"type": "result", "videos": videos}
+        return
 
     prompt = """
     You are given a list of recently published YouTube videos from various channels.
@@ -101,6 +179,7 @@ def filter_videos(videos):
     
     Return a JSON object with a single key "video_ids" whose value is an array of
     the video ID strings that should be kept. Include every ID that survives dedup.
+    IMPORTANT: The array MUST contain literal strings, not numbers or booleans (e.g. ["abc", "123"]).
     """
 
     video_metadata = []
@@ -113,10 +192,20 @@ def filter_videos(videos):
     try:
         future_to_video = {executor.submit(get_video_transcript, v.get('id') or 'unknown'): v for v in videos if isinstance(v, dict) and v.get('id')}
         processed_vids = set()
+        count = 0
+        total = len(future_to_video)
         try:
-            for future in concurrent.futures.as_completed(future_to_video, timeout=25):
+            for future in concurrent.futures.as_completed(future_to_video, timeout=60):
+                if check_abortion and not check_abortion():
+                    logger.info("AI Filter: Transcript fetch aborted by user.")
+                    break
+                
                 v = future_to_video[future]
                 processed_vids.add(v.get('id', ''))
+                count += 1
+                if count % 5 == 0 or count == 1 or count == total:
+                    yield {"type": "progress", "message": f"Fetching transcripts: {count}/{total}..."}
+                
                 try:
                     snippet = future.result()
                 except Exception:
@@ -144,15 +233,60 @@ def filter_videos(videos):
             f.cancel()
         executor.shutdown(wait=False)
 
+    if check_abortion and not check_abortion():
+        return
+
+    yield {"type": "progress", "message": "Analyzing stories with Gemini (Grounding ON)..."}
+
+    # ── Payload Capping ──────────────────────────────────────────────────────
+    # Estimate token/char count to avoid reaching Gemini limits or long wait times.
+    # 1.5 Flash has 1M context, but generating a list of 500 items is slow.
+    # We cap the payload at ~400,000 chars total for safety.
+    serialized_metadata = json.dumps(video_metadata)
+    if len(serialized_metadata) > 400000:
+        logger.warning("AI filter payload too large (%d chars), truncating transcripts.", len(serialized_metadata))
+        for m in video_metadata:
+            if len(m.get('transcript_snippet', '')) > 200:
+                m['transcript_snippet'] = m['transcript_snippet'][:200] + "..."
+        serialized_metadata = json.dumps(video_metadata)
+    # ─────────────────────────────────────────────────────────────────────────
+
     try:
-        response = client.models.generate_content(
-            model='gemini-2.5-pro',
-            contents=f"{prompt}\n\nVideos list:\n{json.dumps(video_metadata, indent=2)}",
-            config=types.GenerateContentConfig(
-                tools=[{"google_search": {}}],
-                temperature=0.1,
-            ),
-        )
+        # Added a per-request timeout to prevent the sync from hanging indefinitely
+        # on network issues or Gemini infrastructure stalls.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ext_executor:
+            response = None
+            last_err = None
+            for model_name in _MODELS_TO_TRY:
+                logger.info("Sync: AI Filter attempting model '%s'...", model_name)
+                future = ext_executor.submit(
+                    client.models.generate_content,
+                    model=model_name,
+                    contents=f"{prompt}\n\nVideos list:\n{serialized_metadata}",
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearchRetrieval())] if _USE_VERTEX else None,
+                        temperature=0.1,
+                    )
+                )
+                try:
+                    response = future.result(timeout=60)
+                    logger.info("Sync: AI Filter successfully used model '%s'", model_name)
+                    break
+                except Exception as e:
+                    last_err = e
+                    err_msg = str(e)
+                    if "404" in err_msg or "NOT_FOUND" in err_msg:
+                        logger.warning("Sync: Model '%s' not found, trying next...", model_name)
+                        continue
+                    else:
+                        logger.error("Sync: AI Filter failed with non-404 error: %s", err_msg)
+                        break
+
+            if not response:
+                logging.error("Gemini API failed after trying all models. Last error: %s", last_err)
+                yield {'type': 'progress', 'message': f"AI Filter: Failed ({type(last_err).__name__}). Falling back to simple deduplication."}
+                yield {"type": "result", "videos": videos}
+                return
 
         try:
             text = response.text.strip()
@@ -181,11 +315,14 @@ def filter_videos(videos):
 
         if not filtered and videos:
             logger.warning("AI filter removed all videos, falling back to original list.")
-            return videos
+            yield {"type": "result", "videos": videos}
+            return
 
-        return filtered
+        yield {"type": "result", "videos": filtered}
+        return
     except Exception:
         logger.exception("Gemini API error or schema parse error")
-        return videos
+        yield {"type": "result", "videos": videos}
+        return
 
 

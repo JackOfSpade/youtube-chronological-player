@@ -17,6 +17,8 @@ export const DOM = Object.freeze({
     resumeBtn:          $('resume-btn'),
     syncBtn:            $('sync-btn'),
     settingsBtn:        $('settings-btn'),
+    syncOverlay:        $('sync-overlay'),
+    syncProgressMsg:    $('sync-progress-msg'),
     notification:       $('notification-banner'),
     prevPageBtn:        $('prev-page-btn'),
     nextPageBtn:        $('next-page-btn'),
@@ -36,6 +38,13 @@ export const DOM = Object.freeze({
     commentBtn:         $('comment-on-youtube-btn'),
     commentsSection:    $('comments-section'),
     commentsContainer:  $('comments-container'),
+    errorModal:         $('error-modal'),
+    closeErrorModalBtn: $('close-error-modal-btn'),
+    errorModalOkBtn:    $('error-modal-ok-btn'),
+    errorModalOverrideBtn: $('error-modal-override-btn'),
+    errorModalMsg:      $('error-modal-msg'),
+    errorDetailsPre:    $('error-details-pre'),
+    errorDetailsCont:   $('error-details-container'),
 });
 
 // ── Application state ──────────────────────────────────────────────────────
@@ -69,6 +78,8 @@ export const state = {
     searchTimeout: null,
     syncEventSource: null,
     isSyncing: false,
+    syncRetryTimeout: null,
+    lastSyncError: null,
 };
 
 // ── Queue index helpers ────────────────────────────────────────────────────
@@ -123,9 +134,9 @@ export function sanitizeHTML(html) {
             continue;
         }
 
-        // Strip event-handler attributes, srcdoc, and style from all remaining elements
+        // Strip ALL attributes except a strict allowlist (href)
         for (const attr of [...el.attributes]) {
-            if (attr.name.startsWith('on') || attr.name === 'srcdoc' || attr.name === 'style') {
+            if (!['href'].includes(attr.name.toLowerCase())) {
                 el.removeAttribute(attr.name);
             }
         }

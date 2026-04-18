@@ -5,10 +5,17 @@
 import { DOM, state, escapeHTML, formatDate, sanitizeHTML } from './state.js';
 
 let _commentFetchId = 0;
+let _commentAbortController = null;
 
 export async function loadComments(videoId, append = false) {
     if (!DOM.commentsSection) return;
     if (append && state.isFetchingComments) return;
+    
+    // Abort previous request if it was non-append (new video)
+    if (!append && _commentAbortController) {
+        _commentAbortController.abort();
+    }
+    _commentAbortController = new AbortController();
 
     const currentFetchId = ++_commentFetchId;
     state.isFetchingComments = true;
@@ -30,7 +37,7 @@ export async function loadComments(videoId, append = false) {
             url += `?pageToken=${encodeURIComponent(state.commentsToken)}`;
         }
 
-        const resp = await fetch(url);
+        const resp = await fetch(url, { signal: _commentAbortController.signal });
         if (!resp.ok) throw new Error(`HTTP error ${resp.status}`);
         const data = await resp.json();
 
@@ -44,13 +51,20 @@ export async function loadComments(videoId, append = false) {
 
         _renderComments(data.comments, videoId, append);
     } catch (err) {
+        if (err.name === 'AbortError') return;
         if (_commentFetchId !== currentFetchId || state.currentPlayingId !== videoId) return;
 
         const loader = document.getElementById('comments-loading-more');
         if (loader) loader.remove();
 
         if (!append) {
-            DOM.commentsContainer.innerHTML = '<div class="comments-status comments-error">Failed to load comments</div>';
+            if (err.message.includes('403') || err.message.includes('Quota')) {
+                DOM.commentsContainer.innerHTML = '<div class="comments-status comments-error">YouTube Quota Exceeded. Try again later.</div>';
+            } else if (err.message.includes('429')) {
+                DOM.commentsContainer.innerHTML = '<div class="comments-status comments-error">Too many requests. Please wait a moment.</div>';
+            } else {
+                DOM.commentsContainer.innerHTML = '<div class="comments-status comments-error">Failed to load comments</div>';
+            }
         }
         console.error(err);
     } finally {

@@ -81,6 +81,30 @@ body {
   overflow-y: auto;
 }
 
+/* ── Custom Scrollbars ─────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.2);
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
 .hidden {
   display: none !important;
 }
@@ -96,12 +120,15 @@ body {
 
 #notification-banner {
   background: rgba(239, 68, 68, 0.2);
-  border-bottom: 1px solid rgba(239, 68, 68, 0.5);
+  border-bottom: 2px solid var(--error-color);
   color: var(--error-soft);
   text-align: center;
-  padding: 10px;
+  padding: 12px;
   font-size: 0.9rem;
+  font-weight: 500;
   backdrop-filter: var(--glass-backdrop);
+  z-index: 1001;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.5);
 }
 
 #main-layout {
@@ -141,7 +168,12 @@ body {
 .glass-btn:hover {
   background: rgba(255, 255, 255, 0.1);
   border-color: rgba(255, 255, 255, 0.2);
-  transform: translateY(-1px);
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+}
+
+.glass-btn:active {
+  transform: translateY(0);
 }
 
 .glass-btn.pulse {
@@ -153,6 +185,45 @@ body {
 .glass-btn.pulse:hover {
   background: var(--accent-hover);
   animation: none;
+}
+
+.glass-btn.syncing {
+  cursor: wait;
+  opacity: 0.8;
+  position: relative;
+  overflow: hidden;
+}
+
+.glass-btn.syncing::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.2), transparent);
+  animation: bar-shimmer 1s infinite;
+}
+
+.glass-btn.error {
+  background: rgba(239, 68, 68, 0.2) !important;
+  border-color: var(--error-color) !important;
+  color: var(--error-soft) !important;
+}
+
+.danger-glass {
+  background: rgba(239, 68, 68, 0.1) !important;
+  border: 1px solid rgba(239, 68, 68, 0.3) !important;
+  color: #ff8e8e !important;
+  box-shadow: 0 0 15px rgba(239, 68, 68, 0.1);
+}
+
+.danger-glass:hover {
+  background: rgba(239, 68, 68, 0.2) !important;
+  border-color: rgba(239, 68, 68, 0.6) !important;
+  box-shadow: 0 0 25px rgba(239, 68, 68, 0.2);
+}
+
+@keyframes bar-shimmer {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(100%); }
 }
 
 @keyframes subtle-pulse {
@@ -189,6 +260,7 @@ body {
   border-radius: var(--radius-xl);
   box-shadow: var(--glass-shadow);
   overflow: hidden;
+  transition: width var(--transition-smooth);
 }
 
 .queue-header {
@@ -257,7 +329,8 @@ body {
 
 .video-item:hover {
   background: rgba(255, 255, 255, 0.05);
-  transform: translateX(4px);
+  transform: translateX(6px) scale(1.01);
+  border-color: rgba(255, 255, 255, 0.1);
 }
 
 .video-item.playing {
@@ -612,6 +685,9 @@ body {
   padding: 20px 24px;
   border-top: 1px solid var(--panel-border);
   background: var(--panel-bg-opaque);
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
 }
 
 .save-btn {
@@ -758,4 +834,86 @@ body {
     height: 60vh;
     flex: none;
   }
+}
+
+/* ── 15. Sync Overlay ──────────────────────────────────────────────────── */
+
+#sync-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  z-index: 2000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fade-in 0.3s ease;
+}
+
+.sync-overlay-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 20px;
+  padding: 40px;
+  text-align: center;
+  max-width: 300px;
+}
+
+#sync-progress-msg {
+  font-weight: 600;
+  font-size: 1.1rem;
+}
+
+.sync-subtext {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+
+.spinner {
+  width: 48px;
+  height: 48px;
+  border: 4px solid rgba(255, 255, 255, 0.1);
+  border-left-color: var(--accent-color);
+  border-radius: 50%;
+  animation: rotate 1s linear infinite;
+}
+
+@keyframes rotate {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+@keyframes fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+
+/* ── 16. Fallbacks ─────────────────────────────────────────────────────── */
+
+img {
+  background: var(--bg-color);
+  min-height: 100%;
+}
+img:not([src]), img[src=""] {
+  opacity: 0;
+}
+.error-border {
+  border: 1px solid var(--error-color) !important;
+  box-shadow: 0 0 20px rgba(239, 68, 68, 0.3) !important;
+}
+
+#error-details-pre {
+  background: rgba(0, 0, 0, 0.3);
+  padding: 12px;
+  border-radius: var(--radius-md);
+  color: var(--error-soft);
+  font-family: monospace;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+  margin-top: 12px;
 }

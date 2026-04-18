@@ -12,7 +12,6 @@ import { loadComments } from './comments.js';
 if (window.YT && window.YT.Player) {
     state.isPlayerReady = true;
 } else {
-    // Not loaded yet — register for when it does
     const _prev = window.onYouTubeIframeAPIReady;
     window.onYouTubeIframeAPIReady = function () {
         state.isPlayerReady = true;
@@ -21,6 +20,35 @@ if (window.YT && window.YT.Player) {
             playVideo(state.currentPlayingId);
         }
     };
+
+    // Global singleton timer to prevent multiple watchdogs if this module is reloaded/imported.
+    if (!window._yt_watchdog_active) {
+        window._yt_watchdog_active = true;
+        setTimeout(() => {
+            if (!state.isPlayerReady && !state.ytPlayer) {
+                console.warn('YouTube API loading timeout.');
+                if (!window.YT || !window.YT.Player || window._yt_script_failed) {
+                    import('./state.js').then(({ showNotification }) => {
+                        showNotification('YouTube API is taking long to load. Refresh if player doesn\'t appear.');
+                    });
+                    _showPlayerError('YouTube API Timeout', 'The player script took too long to load or was blocked by an extension. Please refresh.');
+                }
+            }
+        }, 8000);
+    }
+}
+
+function _showPlayerError(title, message) {
+    const placeholder = document.getElementById('player-placeholder');
+    if (placeholder) {
+        placeholder.innerHTML = `
+            <div class="player-empty-state" style="color: #ff6b6b;">
+                <span class="icon" style="background: rgba(255,107,107,0.1); color: #ff6b6b;">✕</span>
+                <h3>${title}</h3>
+                <p style="margin-top: 10px; opacity: 0.8;">${message}</p>
+            </div>
+        `;
+    }
 }
 
 // ── Public API ─────────────────────────────────────────────────────────────
@@ -110,16 +138,21 @@ function _onStateChange(event) {
 }
 
 function _onError(event) {
-    console.warn('YouTube Player Error:', event.data, 'Skipping video...');
-    _handleEnded(state.currentPlayingId);
+    const errorCode = event.data;
+    // 100: Not found/removed, 101/150: Embed blocked
+    const fatalErrors = [100, 101, 150];
+    
+    if (fatalErrors.includes(errorCode)) {
+        console.warn('YouTube Player Fatal Error:', errorCode, 'Skipping video...');
+        _handleEnded(state.currentPlayingId);
+    } else {
+        console.warn('YouTube Player Transient Error:', errorCode);
+        _showPlayerError('Playback Error', 'Try refreshing or selecting another video.');
+    }
 }
 
 function _handleEnded(videoId) {
-    fetch(`/api/watched/${encodeURIComponent(videoId)}`, { method: 'POST' })
-        .then(res => { if (!res.ok) throw new Error(`HTTP error ${res.status}`); })
-        .catch(err => {
-            console.error('Failed to mark video as watched', err);
-        });
+    navigator.sendBeacon(`/api/watched/${encodeURIComponent(videoId)}`);
 
     state.watchHistory.watched_video_ids.add(videoId);
     state.watchHistory.last_watched_video_id = videoId;
@@ -137,6 +170,16 @@ function _handleEnded(videoId) {
 
 window.addEventListener('beforeunload', () => {
     if (state.currentPlayingId && !state.watchHistory.watched_video_ids.has(state.currentPlayingId)) {
-        navigator.sendBeacon(`/api/watched/${encodeURIComponent(state.currentPlayingId)}`);
+        // Only mark as watched on exit if we've watched for at least 15 seconds
+        let playedTime = 0;
+        try {
+            if (state.ytPlayer && typeof state.ytPlayer.getCurrentTime === 'function') {
+                playedTime = state.ytPlayer.getCurrentTime();
+            }
+        } catch (e) {}
+
+        if (playedTime > 15) {
+            navigator.sendBeacon(`/api/watched/${encodeURIComponent(state.currentPlayingId)}`);
+        }
     }
 });

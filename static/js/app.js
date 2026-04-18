@@ -35,7 +35,11 @@ function init() {
 
     // ── Queue controls ─────────────────────────────────────────────────
     DOM.syncBtn.addEventListener('click', () => {
-        if (DOM.syncBtn.textContent !== 'Sync') return;
+        if (state.isSyncing) return;
+        if (DOM.syncBtn.classList.contains('error')) {
+            showErrorModal('Synchronization failed. Click Dismiss to try again, or click here for details.', state.lastSyncError);
+            return;
+        }
         DOM.syncBtn.textContent = '...';
         loadQueueData(true);
     });
@@ -74,6 +78,59 @@ function init() {
             }
         }
     });
+
+    // ── Error modal ───────────────────────────────────────────────────
+    const closeError = () => {
+        DOM.errorModal.classList.add('hidden');
+        DOM.syncBtn.classList.remove('error');
+        DOM.syncBtn.textContent = 'Sync';
+    };
+    DOM.closeErrorModalBtn.addEventListener('click', closeError);
+    DOM.errorModalOkBtn.addEventListener('click', closeError);
+
+    DOM.errorModalOverrideBtn.addEventListener('click', async () => {
+        try {
+            DOM.errorModalOverrideBtn.disabled = true;
+            DOM.errorModalOverrideBtn.textContent = 'Resetting...';
+            const resp = await fetch('/api/sync/reset', { method: 'POST' });
+            const data = await resp.json();
+            if (data.status === 'success') {
+                closeError();
+                loadQueueData(true);
+            } else {
+                alert(data.message || 'Reset failed.');
+            }
+        } catch (err) {
+            console.error('Manual override failed:', err);
+            alert('Connection error during reset.');
+        } finally {
+            DOM.errorModalOverrideBtn.disabled = false;
+            DOM.errorModalOverrideBtn.textContent = 'Manual Override';
+        }
+    });
+}
+
+export function showErrorModal(msg, details = null) {
+    DOM.errorModalMsg.textContent = msg;
+    
+    let isLocked = false;
+    if (details) {
+        const detailStr = typeof details === 'string' ? details : JSON.stringify(details);
+        isLocked = detailStr.includes('LOCKED') || detailStr.includes('already running');
+        DOM.errorDetailsPre.textContent = typeof details === 'string' ? details : JSON.stringify(details, null, 2);
+        DOM.errorDetailsCont.classList.remove('hidden');
+    } else {
+        DOM.errorDetailsCont.classList.add('hidden');
+    }
+
+    // Only show override if it seems like a lock issue, or always for safety if you want
+    if (isLocked) {
+        DOM.errorModalOverrideBtn.classList.remove('hidden');
+    } else {
+        DOM.errorModalOverrideBtn.classList.add('hidden');
+    }
+
+    DOM.errorModal.classList.remove('hidden');
 }
 
 document.addEventListener('DOMContentLoaded', init);

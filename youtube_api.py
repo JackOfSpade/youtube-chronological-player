@@ -11,6 +11,9 @@ import functools
 import requests
 from dateutil import parser as dateutil_parser
 
+from urllib3.util.retry import Retry
+from requests.adapters import HTTPAdapter
+
 import config_manager as cfg
 
 logger = logging.getLogger(__name__)
@@ -18,7 +21,15 @@ logger = logging.getLogger(__name__)
 # ── Low-level request wrapper ───────────────────────────────────────────────
 
 _global_session = requests.Session()
-_adapter = requests.adapters.HTTPAdapter(pool_connections=20, pool_maxsize=20)
+
+# Implement retries for transient HTTP errors (502, 503, 504)
+_retries = Retry(
+    total=3,
+    backoff_factor=1,
+    status_forcelist=[502, 503, 504],
+    allowed_methods=["GET"]
+)
+_adapter = HTTPAdapter(pool_connections=20, pool_maxsize=20, max_retries=_retries)
 _global_session.mount('https://', _adapter)
 _global_session.mount('http://', _adapter)
 
@@ -60,10 +71,21 @@ def _parse_iso_datetime(date_str, default_min=False):
 
 
 def _api_get(url, params=None, session=None):
-    """Perform a GET with timeout.  Returns parsed JSON or {} on failure."""
+    """Perform a GET with timeout and retries. Returns parsed JSON or an error dict on failure."""
     requester = session or _global_session
     try:
         resp = requester.get(url, params=params, timeout=cfg.API_TIMEOUT)
+        
+        # Explicitly handle quota and rate limits
+        if resp.status_code == 403:
+            if 'quotaExceeded' in resp.text:
+                logger.error("YouTube API Quota Exceeded (403).")
+                return {"error": "QUOTA_EXCEEDED", "status_code": 403, "message": "YouTube API Quota Exceeded. Please try again tomorrow."}
+            resp.raise_for_status()
+        if resp.status_code == 429:
+            logger.error("YouTube API Rate Limit Hit (429).")
+            return {"error": "RATE_LIMIT_EXCEEDED", "status_code": 429, "message": "Too many requests. Please wait a moment."}
+            
         resp.raise_for_status()
         data = resp.json()
         return data if isinstance(data, dict) else {}
@@ -72,7 +94,7 @@ def _api_get(url, params=None, session=None):
         if params and 'key' in params:
             err_msg = err_msg.replace(params['key'], '***MASKED***')
         logger.warning("YouTube API request failed: %s — %s", url, err_msg)
-        return {}
+        return {"error": "REQUEST_FAILED", "message": err_msg}
 
 
 # ── Channels ────────────────────────────────────────────────────────────────
@@ -82,14 +104,40 @@ def get_uploads_playlist_id(channel_id, api_key, session=None):
     if not cfg.is_api_key_valid(api_key):
         return None
 
+    params = {'part': 'contentDetails', 'key': api_key}
+    is_handle = channel_id.startswith('@')
+    
+    if is_handle:
+        params['forHandle'] = channel_id
+    else:
+        params['id'] = channel_id
+
     data = _api_get(
         "https://www.googleapis.com/youtube/v3/channels",
-        params={'part': 'contentDetails', 'id': channel_id, 'key': api_key},
+        params=params,
         session=session,
     )
+    if 'error' in data: return data
     items = data.get('items')
+    
+    # Fallback for handle if not found directly (sometimes handles change or API is finicky)
+    if is_handle and (not items or not isinstance(items, list)):
+        fallback_data = _api_get(
+            "https://www.googleapis.com/youtube/v3/search",
+            params={'part': 'snippet', 'type': 'channel', 'q': channel_id, 'maxResults': 1, 'key': api_key},
+            session=session
+        )
+        fb_items = fallback_data.get('items')
+        if isinstance(fb_items, list) and fb_items and isinstance(fb_items[0], dict):
+            snippet = _safe_dict_get(fb_items[0], 'snippet')
+            ch_id = snippet.get('channelId')
+            if isinstance(ch_id, str) and ch_id.strip():
+                # Now fetch the uploads playlist using the resolved ID
+                return get_uploads_playlist_id(ch_id, api_key, session)
+
     if isinstance(items, list) and items and isinstance(items[0], dict):
-        upl = _safe_dict_get(items[0], 'contentDetails', 'relatedPlaylists').get('uploads')
+        related = _safe_dict_get(items[0], 'contentDetails', 'relatedPlaylists')
+        upl = related.get('uploads')
         return str(upl) if isinstance(upl, str) and upl.strip() else None
     return None
 
@@ -104,20 +152,28 @@ def search_channels(query, api_key, session=None):
         params={'part': 'snippet', 'type': 'channel', 'q': query, 'maxResults': 5, 'key': api_key},
         session=session,
     )
+    if 'error' in data: return data
 
     items = data.get('items')
     if not isinstance(items, list):
         items = []
 
-    return [
-        {
-            'channelId': str(item['snippet']['channelId']),
-            'title': str(item['snippet'].get('title') or ''),
-            'thumbnail': str(_get_thumbnail_url(item['snippet'])),
-        }
-        for item in items
-        if isinstance(item, dict) and isinstance(item.get('snippet'), dict) and isinstance(item['snippet'].get('channelId'), str) and item['snippet']['channelId'].strip()
-    ]
+    resolved = []
+    for item in items:
+        if not isinstance(item, dict): continue
+        snippet = item.get('snippet')
+        res_id = item.get('id')
+        if not isinstance(snippet, dict) or not isinstance(res_id, dict): continue
+        
+        ch_id = res_id.get('channelId') or snippet.get('channelId')
+        if not ch_id or not isinstance(ch_id, str): continue
+        
+        resolved.append({
+            'channelId': str(ch_id),
+            'title': str(snippet.get('title') or 'Unknown'),
+            'thumbnail': str(_get_thumbnail_url(snippet)),
+        })
+    return resolved
 
 
 # ── Videos / Playlist ──────────────────────────────────────────────────────
@@ -138,7 +194,7 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
     while page_count < 10:
         page_count += 1
         params = {
-            'part': 'snippet',
+            'part': 'snippet,status',
             'maxResults': 50,
             'playlistId': playlist_id,
             'key': api_key,
@@ -151,6 +207,7 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
             params=params,
             session=session,
         )
+        if 'error' in data: return data
         items = data.get('items')
         if not items or not isinstance(items, list):
             break
@@ -160,7 +217,11 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
             if not isinstance(item, dict):
                 continue
             snippet = item.get('snippet')
+            status = item.get('status')
             if not isinstance(snippet, dict) or 'publishedAt' not in snippet:
+                continue
+            
+            if isinstance(status, dict) and status.get('privacyStatus') != 'public':
                 continue
             
             pub_dt = _parse_iso_datetime(snippet['publishedAt'])
@@ -172,8 +233,7 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
                 video_id = _safe_dict_get(snippet, 'resourceId').get('videoId', '')
                 if not isinstance(video_id, str) or not video_id.strip():
                     continue
-                if title not in ('Private video', 'Deleted video'):
-                    videos.append({
+                videos.append({
                         'id': str(video_id),
                         'title': str(title),
                         'channelTitle': str(snippet.get('channelTitle') or ''),
@@ -181,7 +241,8 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
                         'publishedAt': str(snippet['publishedAt']),
                         'thumbnail': str(_get_thumbnail_url(snippet)),
                     })
-            oldest_in_batch = pub_dt
+            if oldest_in_batch is None or pub_dt < oldest_in_batch:
+                oldest_in_batch = pub_dt
 
         next_page_token = data.get('nextPageToken')
         if not next_page_token:
@@ -212,6 +273,7 @@ def fetch_video_comments(video_id, api_key, page_token=None, session=None):
         params['pageToken'] = page_token
 
     data = _api_get("https://www.googleapis.com/youtube/v3/commentThreads", params=params, session=session)
+    if 'error' in data: return data
 
     items = data.get('items')
     if not isinstance(items, list):
@@ -265,7 +327,7 @@ def _parse_comment(snippet, comment_id):
 
 
 def sort_videos_newest_first(videos):
-    """Sort a video list in-place by publishedAt, newest first."""
+    """Sort a video list in-place by publishedAt, newest first. Uses fast lexical sort of ISO strings."""
     if not isinstance(videos, list):
         return
-    videos.sort(key=lambda v: _parse_iso_datetime(v.get('publishedAt', '') if isinstance(v, dict) else '', default_min=True), reverse=True)
+    videos.sort(key=lambda v: str(v.get('publishedAt', '')) if isinstance(v, dict) else '', reverse=True)

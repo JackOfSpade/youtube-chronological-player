@@ -9,7 +9,6 @@ import json
 import os
 import threading
 import logging
-import copy
 
 import config_manager as cfg
 
@@ -22,6 +21,7 @@ MAX_WATCHED_HISTORY = 500   # oldest entries evicted when limit is exceeded
 # against Gemini 2.5 Pro's 1M-token context window.
 _history_lock = threading.Lock()
 _history_cache = None
+_history_mtime = 0
 
 
 def _make_default():
@@ -34,13 +34,19 @@ def load_history():
     """Thread-safe: load and return the watch history dict."""
     with _history_lock:
         hist = _load_unlocked()
-        return copy.deepcopy(hist)
+        return {
+            'watched_video_ids': list(hist.get('watched_video_ids', [])),
+            'last_watched_video_id': hist.get('last_watched_video_id')
+        }
 
 
 def save_history(history):
     """Thread-safe: persist the entire history dict."""
     with _history_lock:
-        _save_unlocked(copy.deepcopy(history))
+        _save_unlocked({
+            'watched_video_ids': list(history.get('watched_video_ids', [])),
+            'last_watched_video_id': history.get('last_watched_video_id')
+        })
 
 
 def mark_watched(video_id):
@@ -85,13 +91,24 @@ def _sanitize_id(vid):
 
 
 def _load_unlocked():
-    global _history_cache
-    if _history_cache is not None:
+    global _history_cache, _history_mtime
+    
+    # Check modification time to see if we should invalidate cache
+    mtime = 0
+    if os.path.exists(HISTORY_FILE):
+        try:
+            mtime = os.path.getmtime(HISTORY_FILE)
+        except OSError:
+            pass
+
+    if _history_cache is not None and mtime <= _history_mtime:
         return _history_cache
 
-    if not os.path.exists(HISTORY_FILE):
+    if mtime == 0:
         _history_cache = _make_default()
+        _history_mtime = 0
         return _history_cache
+        
     try:
         with open(HISTORY_FILE, 'r', encoding='utf-8') as f:
             content = f.read(5 * 1024 * 1024)
@@ -120,16 +137,22 @@ def _load_unlocked():
                 sanitized_data['watched_video_ids'] = sanitized_data['watched_video_ids'][-MAX_WATCHED_HISTORY:]
                 
             _history_cache = sanitized_data
+            _history_mtime = mtime
             return _history_cache
-    except Exception:
+    except Exception as e:
+        logger.warning("Failed to load history, falling back to default: %s", e)
         _history_cache = _make_default()
+        _history_mtime = 0 # force reload attempt next time
         return _history_cache
 
 
 def _save_unlocked(history):
-    global _history_cache
+    global _history_cache, _history_mtime
     _history_cache = history
     try:
         cfg.atomic_write_json(history, HISTORY_FILE)
+        # Update mtime after successful write to avoid immediately reloading our own write
+        if os.path.exists(HISTORY_FILE):
+             _history_mtime = os.path.getmtime(HISTORY_FILE)
     except Exception as exc:
         logger.error("Failed to persist watch history: %s", exc)

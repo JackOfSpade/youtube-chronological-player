@@ -15,7 +15,16 @@
 <body>
     <div id="app-container">
         <!-- Error / Notification banner -->
-        <div id="notification-banner" class="hidden"></div>
+        <div id="notification-banner" class="hidden glass-panel"></div>
+
+        <!-- Sync Overlay -->
+        <div id="sync-overlay" class="hidden">
+            <div class="sync-overlay-content glass-panel">
+                <div class="spinner"></div>
+                <div id="sync-progress-msg">Synchronizing channels...</div>
+                <div class="sync-subtext">This may take a minute for AI filtering</div>
+            </div>
+        </div>
         
         <div id="main-layout">
             <!-- Left panel: Video Queue -->
@@ -95,9 +104,34 @@
             </div>
         </div>
     </div>
+    <!-- Error Detail Modal -->
+    <div id="error-modal" class="modal-overlay hidden">
+        <div class="modal-content glass-panel error-border">
+            <div class="modal-header">
+                <h2>Sync Error</h2>
+                <button id="close-error-modal-btn" class="icon-btn">✕</button>
+            </div>
+            <div class="modal-body">
+                <p id="error-modal-msg">An unexpected error occurred during synchronization.</p>
+                <div id="error-details-container" class="hidden">
+                    <pre id="error-details-pre"></pre>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button id="error-modal-override-btn" class="glass-btn danger-glass hidden">Manual Override</button>
+                <button id="error-modal-ok-btn" class="glass-btn">Dismiss</button>
+            </div>
+        </div>
+    </div>
 
     <!-- YouTube IFrame API -->
-    <script src="https://www.youtube.com/iframe_api"></script>
+    <script>
+        window.onYouTubeIframeAPIFailed = function() {
+            console.error("YouTube IFrame API failed to load (possibly blocked by an extension).");
+            window._yt_script_failed = true;
+        }
+    </script>
+    <script src="https://www.youtube.com/iframe_api" onerror="window.onYouTubeIframeAPIFailed()"></script>
     <!-- App Script (ES module) -->
     <script type="module" src="/static/js/app.js"></script>
 </body>
