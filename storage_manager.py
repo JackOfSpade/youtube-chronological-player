@@ -14,7 +14,7 @@ import config_manager as cfg
 
 logger = logging.getLogger(__name__)
 
-HISTORY_FILE = 'data/history.json'
+HISTORY_FILE = os.path.join(cfg.DATA_DIR, 'history.json')
 MAX_WATCHED_HISTORY = 500   # oldest entries evicted when limit is exceeded
 # 500 entries ≈ 2–5 months of history at typical watch rates.
 # Each YouTube ID is 11 chars, so 500 IDs ≈ 2,000 tokens — negligible

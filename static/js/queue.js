@@ -19,12 +19,19 @@ export function resizeQueue() {
     if (h === 0) return;
 
     let itemH = 104;
+    let gap = 12;
     const first = DOM.queueList.querySelector('.video-item, .skeleton-item');
     if (first && first.offsetHeight > 0) {
-        const gap = parseFloat(getComputedStyle(DOM.queueList).gap) || 12;
+        gap = parseFloat(getComputedStyle(DOM.queueList).gap) || 12;
         itemH = Math.max(1, first.offsetHeight + gap);
     }
-    const calc = Math.max(1, Math.floor((h - 8) / itemH));
+    
+    // The container has 16px top and 16px bottom padding (32px total).
+    // The available height for items is h - 32.
+    // N items take: N * offsetHeight + (N - 1) * gap
+    // N * offsetHeight + N * gap - gap <= h - 32
+    // N * itemH <= h - 32 + gap
+    const calc = Math.min(5, Math.max(1, Math.floor((h - 32 + gap) / itemH)));
 
     if (state.pageSize !== calc) {
         state.pageSize = calc;
@@ -40,6 +47,8 @@ export function resizeQueue() {
 export function renderQueue() {
     if (state.isSyncing) {
         DOM.queueList.innerHTML = `
+            <div class="skeleton-item"></div>
+            <div class="skeleton-item"></div>
             <div class="skeleton-item"></div>
             <div class="skeleton-item"></div>
             <div class="skeleton-item"></div>

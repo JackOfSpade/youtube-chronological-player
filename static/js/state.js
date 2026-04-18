@@ -64,7 +64,7 @@ export const state = {
     currentPlayingId: null,
 
     currentPage: 1,
-    pageSize: 10,
+    pageSize: 5,
 
     /** videoId → index in queue (rebuilt on mutation) */
     queueIndex: new Map(),

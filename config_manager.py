@@ -25,9 +25,10 @@ _config_lock = threading.Lock()
 
 # ── Path Constants ──────────────────────────────────────────────────────────
 
-CONFIG_FILE = 'config.yaml'
-CACHE_FILE = 'data/cache.json'
-DATA_DIR = 'data'
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CONFIG_FILE = os.path.join(BASE_DIR, 'config.yaml')
+CACHE_FILE = os.path.join(BASE_DIR, 'data', 'cache.json')
+DATA_DIR = os.path.join(BASE_DIR, 'data')
 
 # Ensure data directory exists on load
 os.makedirs(DATA_DIR, exist_ok=True)
@@ -107,13 +108,17 @@ def _atomic_write(data, target_path, directory, mode, writer_func):
             pass
 
 
-def atomic_write_json(data, target_path, directory=DATA_DIR):
+def atomic_write_json(data, target_path, directory=None):
     """Write JSON atomically."""
+    if directory is None:
+        directory = DATA_DIR
     _atomic_write(data, target_path, directory, 'w', lambda d, f: json.dump(d, f, indent=2))
 
 
-def atomic_write_yaml(data, target_path, directory='.'):
+def atomic_write_yaml(data, target_path, directory=None):
     """Write YAML atomically."""
+    if directory is None:
+        directory = BASE_DIR
     _atomic_write(data, target_path, directory, 'w', lambda d, f: yaml.safe_dump(d, f, sort_keys=False))
 
 
