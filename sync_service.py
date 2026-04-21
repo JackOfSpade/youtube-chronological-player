@@ -88,8 +88,8 @@ _sync_manager = SyncStateManager()
 # ── Queue (non-streaming) ──────────────────────────────────────────────────
 
 def get_queue(force_sync=False):
-    """Return the cached queue, or fetch fresh if expired / forced."""
-    if not force_sync and cfg.is_cache_valid():
+    """Return the cached queue, or fetch fresh if forced."""
+    if not force_sync:
         return cfg.load_cache()
 
     # Consume the streaming generator to get the final video list.
@@ -140,10 +140,9 @@ def _deduplicate_by_id(videos):
 
 def get_queue_stream(force_sync=False):
     """
-    Generator that yields SSE events.  Uses cache if valid, otherwise
-    fetches in parallel and streams progress events.
+    Generator that yields SSE events. Returns cache unless sync is forced.
     """
-    if not force_sync and cfg.is_cache_valid():
+    if not force_sync:
         videos = cfg.load_cache()
         yield _sse_event({'type': 'videos', 'videos': videos})
         yield _sse_event({'type': 'done', 'message': 'Loaded from cache'})
@@ -192,10 +191,7 @@ def _fetch_all_videos_stream_locked(force_sync=False):
         yield _sse_event({'type': 'error', 'message': 'No API Key'})
         return
 
-    if force_sync:
-        # Explicitly invalidate cache at start of forced sync to prevent
-        # serving stale data if the process halts mid-way.
-        cfg.save_cache([])
+    # (Removed early cache wipe to preserve data for merging)
 
     channels = cfg.deduplicate_channels(raw_channels_list)
     if not channels:
@@ -299,16 +295,23 @@ def _fetch_all_videos_stream_locked(force_sync=False):
         elif event.get('type') == 'result':
             filtered_videos = event.get('videos', all_videos)
 
-    # ── Already-watched check ────────────────────────────────────────────────
+    # ── Merge with Cache ─────────────────────────────────────────────────────
     # The UI uses the global history to render the "watched" badge. We simply
-    # return the filtered videos (which are already sorted newest-first).
-    truly_new = filtered_videos
+    # merge the newly filtered videos with the existing cache, deduplicate,
+    # sort, and cap at 500 to prevent infinite growth.
+    cached_videos = cfg.load_cache()
+    combined_videos = filtered_videos + cached_videos
+    combined_videos = _deduplicate_by_id(combined_videos)
+    youtube_api.sort_videos_newest_first(combined_videos)
+    
+    if len(combined_videos) > 500:
+        combined_videos = combined_videos[:500]
     # ────────────────────────────────────────────────────────────────────────
 
     try:
-        cfg.save_cache(truly_new)
+        cfg.save_cache(combined_videos)
     except Exception as exc:
         logger.warning("Failed to save cache: %s", exc)
 
-    yield _sse_event({'type': 'videos', 'videos': truly_new})
+    yield _sse_event({'type': 'videos', 'videos': combined_videos})
     yield _sse_event({'type': 'done', 'message': 'Sync complete!'})

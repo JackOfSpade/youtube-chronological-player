@@ -284,15 +284,15 @@ _queue_cache = None
 _queue_mtime = 0
 _queue_lock = threading.Lock()
 
-def is_cache_valid():
-    """True if the cache file exists and was written within CACHE_EXPIRY_HOURS."""
+def is_cache_stale():
+    """True if the cache file does not exist or is older than CACHE_EXPIRY_HOURS."""
     try:
         if not os.path.exists(CACHE_FILE):
-            return False
+            return True
         modified = datetime.datetime.fromtimestamp(os.path.getmtime(CACHE_FILE), tz=datetime.timezone.utc)
-        return (datetime.datetime.now(datetime.timezone.utc) - modified) <= datetime.timedelta(hours=CACHE_EXPIRY_HOURS)
+        return (datetime.datetime.now(datetime.timezone.utc) - modified) > datetime.timedelta(hours=CACHE_EXPIRY_HOURS)
     except Exception:
-        return False
+        return True
 
 
 def load_cache():

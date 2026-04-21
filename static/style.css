@@ -202,6 +202,30 @@ body {
   animation: bar-shimmer 1s infinite;
 }
 
+.glass-btn.stale-warning {
+  position: relative;
+  border-color: rgba(245, 158, 11, 0.4);
+}
+
+.glass-btn.stale-warning::after {
+  content: "";
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 10px;
+  height: 10px;
+  background-color: #f59e0b;
+  border-radius: 50%;
+  box-shadow: 0 0 8px rgba(245, 158, 11, 0.8);
+  animation: subtle-pulse-orange 2s infinite;
+}
+
+@keyframes subtle-pulse-orange {
+  0%   { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0.4); }
+  70%  { box-shadow: 0 0 0 6px rgba(245, 158, 11, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); }
+}
+
 .glass-btn.error {
   background: rgba(239, 68, 68, 0.2) !important;
   border-color: var(--error-color) !important;

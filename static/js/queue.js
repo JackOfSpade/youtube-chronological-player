@@ -192,6 +192,12 @@ export function loadQueueData(force = false) {
                         watched_video_ids: new Set(Array.isArray(data.history?.watched_video_ids) ? data.history.watched_video_ids : []),
                         last_watched_video_id: data.history?.last_watched_video_id || null,
                     };
+
+                    if (data.cache_stale) {
+                        DOM.syncBtn.classList.add('stale-warning');
+                    } else {
+                        DOM.syncBtn.classList.remove('stale-warning');
+                    }
                 }
                 else if (data.type === 'progress') {
                     DOM.syncProgressMsg.textContent = data.message;
@@ -242,8 +248,10 @@ export function loadQueueData(force = false) {
                     es.close();
                     state.isSyncing = false;
                     DOM.syncBtn.textContent = force ? '✓' : 'Sync';
-                    if (force) setTimeout(() => { DOM.syncBtn.textContent = 'Sync'; }, 2000);
-                    
+                    if (force) {
+                        setTimeout(() => { DOM.syncBtn.textContent = 'Sync'; }, 2000);
+                        DOM.syncBtn.classList.remove('stale-warning');
+                    }
                     if (state.queue.length > 0) {
                         resizeQueue();
                         const oldest = findOldestUnwatchedIndex();

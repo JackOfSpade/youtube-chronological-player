@@ -128,6 +128,7 @@ def get_queue():
             'queue': sync_service.get_queue(force_sync=force),
             'history': storage_manager.load_history(),
             'api_key_configured': cfg.is_api_configured(),
+            'cache_stale': cfg.is_cache_stale(),
         })
     except Exception as e:
         logging.exception("Endpoint /api/queue failed")
@@ -143,7 +144,7 @@ def sync_stream():
         req_id = str(uuid.uuid4())
         try:
             history = storage_manager.load_history()
-            yield f"data: {json.dumps({'type': 'init', 'req_id': req_id, 'history': history, 'api_key_configured': cfg.is_api_configured()})}\n\n"
+            yield f"data: {json.dumps({'type': 'init', 'req_id': req_id, 'history': history, 'api_key_configured': cfg.is_api_configured(), 'cache_stale': cfg.is_cache_stale()})}\n\n"
             yield from sync_service.get_queue_stream(force_sync=force)
         except Exception as e:
             logging.exception("SSE stream failed")
