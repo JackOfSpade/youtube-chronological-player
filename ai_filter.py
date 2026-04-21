@@ -1,8 +1,8 @@
 """
-ai_filter.py — Gemini-powered video deduplication.
+ai_filter.py — Gemini-powered video relevance filtering and deduplication.
 
 Uses transcript analysis and web-grounded bias assessment to select the best
-representative video when multiple channels cover the same news story.
+representative video when multiple channels cover the same news story, and discards all videos unrelated to stock trading and financial markets.
 """
 
 import os
@@ -144,7 +144,7 @@ def _extract_json_from_text(text):
 
 def filter_videos(videos, check_abortion=None):
     """
-    Deduplicate *videos* using Gemini with search grounding.
+    Filter videos for market relevance and deduplicate using Gemini with search grounding.
 
     Returns a generator yielding progress dicts and a final 'result' dict, e.g.:
     {"type": "progress", "message": "..."}
@@ -163,23 +163,33 @@ def filter_videos(videos, check_abortion=None):
     if not videos:
         yield {"type": "result", "videos": []}
         return
-        
-    if len(videos) <= 1:
-        yield {"type": "result", "videos": videos}
-        return
 
     prompt = """
     You are given a list of recently published YouTube videos from various channels.
-    Your task is to identify videos that cover the EXACT SAME news story (duplicates) and filter them down to a single video per story.
+    Your task is to analyze these videos and filter them according to TWO main criteria:
     
-    Rules for selecting which video to keep for a given story:
-    1. PRIORITY 1 (Narration): Read the provided 'transcript_snippet' for each video. You MUST prefer videos that contain structured narration/commentary over videos that are just unstructured background noise (raw footage). Keep raw footage only if it is the absolute ONLY option.
-    2. PRIORITY 2 (Unbiasedness as Tie-Breaker): If multiple videos for the same story have structured narration, use Google Search to research those channels and determine their current media bias and reputation. Break the tie by keeping the video from the most neutral/unbiased channel.
-    3. If videos do not cover the same story as another, keep them.
+    CRITERION A: STOCK MARKET RELEVANCE (Removal)
+    Think like a stock trader. Remove any video that would NOT plausibly move any stock,
+    sector, commodity, currency, or financial market. Use your own broad judgment —
+    this includes direct company news, but also geopolitics, macroeconomics, technology
+    breakthroughs, policy changes, or anything else a trader would care about.
+    Remove things like local crime, car crashes, celebrity gossip, sports scores, or
+    human interest stories that have no economic angle.
     
-    Return a JSON object with a single key "video_ids" whose value is an array of
-    the video ID strings that should be kept. Include every ID that survives dedup.
-    IMPORTANT: The array MUST contain literal strings, not numbers or booleans (e.g. ["abc", "123"]).
+    If a video's transcript_snippet is unavailable, judge relevance from its TITLE
+    and CHANNEL NAME alone, giving news channels the benefit of the doubt.
+    
+    CRITERION B: DEDUPLICATION (Selection)
+    For the videos that pass Criterion A, identify those covering the EXACT SAME story
+    and keep only one per story:
+    1. Prefer videos with structured narration over raw footage.
+    2. Break ties by keeping the most neutral/unbiased channel (use Google Search to verify).
+    3. Keep all unique stories.
+    
+    Return a JSON object: {"video_ids": ["id1", "id2", ...]}.
+    Include every ID that survives both filtering and dedup.
+    If NONE are market-relevant, return {"video_ids": []}.
+    The array MUST contain literal strings, not numbers or booleans.
     """
 
     video_metadata = []
@@ -236,7 +246,7 @@ def filter_videos(videos, check_abortion=None):
     if check_abortion and not check_abortion():
         return
 
-    yield {"type": "progress", "message": "Analyzing stories with Gemini (Grounding ON)..."}
+    yield {"type": "progress", "message": "Filtering by market relevance & deduplicating stories with Gemini..."}
 
     # ── Payload Capping ──────────────────────────────────────────────────────
     # Estimate token/char count to avoid reaching Gemini limits or long wait times.
@@ -269,7 +279,7 @@ def filter_videos(videos, check_abortion=None):
                     )
                 )
                 try:
-                    response = future.result(timeout=60)
+                    response = future.result(timeout=120)
                     logger.info("Sync: AI Filter successfully used model '%s'", model_name)
                     break
                 except Exception as e:
@@ -283,8 +293,8 @@ def filter_videos(videos, check_abortion=None):
                         break
 
             if not response:
-                logging.error("Gemini API failed after trying all models. Last error: %s", last_err)
-                yield {'type': 'progress', 'message': f"AI Filter: Failed ({type(last_err).__name__}). Falling back to simple deduplication."}
+                logger.error("Gemini API failed after trying all models. Last error: %s", last_err)
+                yield {'type': 'progress', 'message': f"AI Filter: Failed ({type(last_err).__name__}). Returning unfiltered."}
                 yield {"type": "result", "videos": videos}
                 return
 
@@ -302,21 +312,25 @@ def filter_videos(videos, check_abortion=None):
         except Exception:
             parsed = {}
 
-        kept_ids = parsed.get("video_ids", [])
+        kept_ids = parsed.get("video_ids")
+
+        # Distinguish between parse failure (key missing entirely) and
+        # Gemini intentionally returning an empty list (no relevant videos).
+        if kept_ids is None:
+            # Parse failure: 'video_ids' key was not in the response at all.
+            logger.warning("AI filter: Gemini response missing 'video_ids' key. Falling back to original list.")
+            yield {"type": "result", "videos": videos}
+            return
+
         if not isinstance(kept_ids, list):
             kept_ids = []
 
-        kept_set = set(str(v) for v in kept_ids if isinstance(v, (str, int, float, bool)))
+        kept_set = set(str(v) for v in kept_ids if isinstance(v, (str, int, float)))
 
         filtered = [v for v in videos if isinstance(v, dict) and str(v.get('id')) in kept_set]
 
         removed = len(videos) - len(filtered)
-        logger.info("AI filter: %d input → %d kept (%d duplicates removed)", len(videos), len(filtered), removed)
-
-        if not filtered and videos:
-            logger.warning("AI filter removed all videos, falling back to original list.")
-            yield {"type": "result", "videos": videos}
-            return
+        logger.info("AI filter: %d input → %d kept (%d irrelevant/duplicate removed)", len(videos), len(filtered), removed)
 
         yield {"type": "result", "videos": filtered}
         return
