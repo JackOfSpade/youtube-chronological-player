@@ -112,8 +112,6 @@ export function renderQueue() {
     DOM.pageIndicator.textContent = `Page ${state.currentPage} of ${total}`;
     DOM.prevPageBtn.classList.toggle('hidden', state.currentPage <= 1);
     DOM.nextPageBtn.classList.toggle('hidden', state.currentPage >= total);
-
-    _scrollToCurrent();
 }
 
 export function updateResumeButton() {
@@ -346,13 +344,3 @@ async function _monitorExistingSync() {
     poll();
 }
 
-function _scrollToCurrent() {
-    if (!state.currentPlayingId) return;
-    const items = document.querySelectorAll('.video-item');
-    for (const el of items) {
-        if (el.dataset.id === state.currentPlayingId) {
-            el.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            break;
-        }
-    }
-}
