@@ -166,8 +166,8 @@ def filter_videos(videos, check_abortion=None):
 
     prompt = """
     You are given a list of recently published YouTube videos from various channels.
-    Your task is to analyze these videos and filter them according to TWO main criteria:
-    
+    Your task is to analyze these videos and filter them according to THREE main criteria:
+
     CRITERION A: STOCK MARKET RELEVANCE (Removal)
     Think like a stock trader. Remove any video that would NOT plausibly move any stock,
     sector, commodity, currency, or financial market. Use your own broad judgment —
@@ -175,20 +175,40 @@ def filter_videos(videos, check_abortion=None):
     breakthroughs, policy changes, or anything else a trader would care about.
     Remove things like local crime, car crashes, celebrity gossip, sports scores, or
     human interest stories that have no economic angle.
-    
+
     If a video's transcript_snippet is unavailable, judge relevance from its TITLE
     and CHANNEL NAME alone, giving news channels the benefit of the doubt.
-    
-    CRITERION B: DEDUPLICATION (Selection)
-    For the videos that pass Criterion A, identify those covering the EXACT SAME story
-    and keep only one per story:
+
+    CRITERION B: FACT-BASED ONLY — NO OPINIONS (Removal)
+    Remove any video that is opinion-based, analysis, commentary, prediction, debate,
+    interview, or punditry. Keep ONLY hard news that reports something that ACTUALLY
+    HAPPENED (events, announcements, releases, filings, data prints, deals, rulings,
+    appointments, incidents).
+
+    REMOVE: "Why X will crash", "What this means for Y", "Expert says...", "Top 5 stocks
+    to buy", "How to think about...", "My take on...", "Should you buy X?", reaction
+    videos, panel discussions, analyst forecasts, op-eds, predictions, host monologues,
+    explainer/educational content, market outlooks.
+
+    KEEP: "Fed raises rates by 0.25%", "Apple announces Q3 earnings beat", "Company X
+    files for bankruptcy", "President signs bill into law", "Earthquake hits region",
+    "CEO resigns" — straightforward reports of events that occurred.
+
+    If a title or transcript leans on words like "could", "should", "might", "what to
+    expect", "outlook", "forecast", "prediction", "analysis", "opinion", "reaction",
+    "explained", "why" — it is almost certainly opinion/commentary; remove it. When in
+    doubt, REMOVE.
+
+    CRITERION C: DEDUPLICATION (Selection)
+    For the videos that pass Criteria A and B, identify those covering the EXACT SAME
+    story and keep only one per story:
     1. Prefer videos with structured narration over raw footage.
     2. Break ties by keeping the most neutral/unbiased channel (use Google Search to verify).
     3. Keep all unique stories.
-    
+
     Return a JSON object: {"video_ids": ["id1", "id2", ...]}.
-    Include every ID that survives both filtering and dedup.
-    If NONE are market-relevant, return {"video_ids": []}.
+    Include every ID that survives all filtering and dedup.
+    If NONE qualify, return {"video_ids": []}.
     The array MUST contain literal strings, not numbers or booleans.
     """
 
