@@ -79,6 +79,38 @@ app = Flask(__name__)
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024  # 10 MB limit for JSON payloads
 
 
+def _internal_error_response():
+    """Return a client-safe response while the caller logs the exception."""
+    return jsonify({'status': 'error', 'message': 'Internal Server Error'}), 500
+
+
+def _upstream_error_response(result):
+    """Convert known YouTube API failures to a fixed, client-safe response.
+
+    ``youtube_api`` retains the original error for server-side logging. Its
+    error dictionaries must not be returned verbatim because request-library
+    errors can contain internal URLs, file paths, or credentials.
+    """
+    error = result.get('error') if isinstance(result, dict) else None
+    known_errors = {
+        'QUOTA_EXCEEDED': (
+            'QUOTA_EXCEEDED',
+            'YouTube API quota has been exceeded. Please try again tomorrow.',
+            403,
+        ),
+        'RATE_LIMIT_EXCEEDED': (
+            'RATE_LIMIT_EXCEEDED',
+            'Too many requests. Please wait a moment.',
+            429,
+        ),
+    }
+    code, message, status = known_errors.get(
+        error,
+        ('REQUEST_FAILED', 'The YouTube service is temporarily unavailable.', 502),
+    )
+    return jsonify({'error': code, 'message': message}), status
+
+
 # ── Global Error Handlers ───────────────────────────────────────────────────
 
 @app.errorhandler(Exception)
@@ -130,9 +162,9 @@ def get_queue():
             'api_key_configured': cfg.is_api_configured(),
             'cache_stale': cfg.is_cache_stale(),
         })
-    except Exception as e:
+    except Exception:
         logging.exception("Endpoint /api/queue failed")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return _internal_error_response()
 
 
 @app.route('/api/sync/stream')
@@ -146,7 +178,7 @@ def sync_stream():
             history = storage_manager.load_history()
             yield f"data: {json.dumps({'type': 'init', 'req_id': req_id, 'history': history, 'api_key_configured': cfg.is_api_configured(), 'cache_stale': cfg.is_cache_stale()})}\n\n"
             yield from sync_service.get_queue_stream(force_sync=force)
-        except Exception as e:
+        except Exception:
             logging.exception("SSE stream failed")
             yield f"data: {json.dumps({'type': 'error', 'message': 'Internal Server Error during sync'})}\n\n"
 
@@ -196,9 +228,9 @@ def get_config():
             'channels': channels_data,
             'start_date': str(config.get('start_date') or ''),
         })
-    except Exception as e:
+    except Exception:
         logging.exception("Endpoint /api/config failed")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return _internal_error_response()
 
 
 @app.route('/api/channels', methods=['POST'])
@@ -211,10 +243,11 @@ def save_channels():
     try:
         cfg.save_channels(data.get('channels', []))
         return jsonify({'status': 'success'})
-    except ValueError as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 400
-    except Exception as e:
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    except ValueError:
+        return jsonify({'status': 'error', 'message': 'Invalid channel data'}), 400
+    except Exception:
+        logging.exception("Endpoint /api/channels failed")
+        return _internal_error_response()
 
 
 @app.route('/api/search_channels')
@@ -231,11 +264,10 @@ def search_channels_route():
         
         results = youtube_api.search_channels(query, config.get('api_key'))
         if isinstance(results, dict) and 'error' in results:
-            status = results.get('status_code', 500)
-            return jsonify(results), status
+            return _upstream_error_response(results)
             
         return jsonify(results)
-    except Exception as e:
+    except Exception:
         logging.exception("Endpoint /api/search_channels failed")
         return jsonify([]), 500
 
@@ -261,11 +293,10 @@ def get_comments(video_id):
             video_id, config.get('api_key'), page_token,
         )
         if isinstance(data, dict) and data.get('error'):
-            status = data.get('status_code', 500)
-            return jsonify(data), status
+            return _upstream_error_response(data)
             
         return jsonify(data)
-    except Exception as e:
+    except Exception:
         logging.exception("Endpoint /api/comments failed")
         return jsonify({"comments": [], "nextPageToken": None}), 500
 
@@ -283,9 +314,9 @@ def mark_watched(video_id):
             return jsonify({'status': 'error', 'message': 'Invalid ID'}), 400
         storage_manager.mark_watched(video_id)
         return jsonify({'status': 'success'})
-    except Exception as e:
+    except Exception:
         logging.exception("Endpoint /api/watched failed")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return _internal_error_response()
 
 
 @app.route('/api/history')
@@ -293,7 +324,7 @@ def mark_watched(video_id):
 def get_history():
     try:
         return jsonify(storage_manager.load_history())
-    except Exception as e:
+    except Exception:
         logging.exception("Endpoint /api/history failed")
         return jsonify(storage_manager._make_default()), 500
 
@@ -301,4 +332,4 @@ def get_history():
 # ── Entry Point ─────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
-    app.run(debug=True, host='127.0.0.1', port=5001)
+    app.run(host='127.0.0.1', port=5001)

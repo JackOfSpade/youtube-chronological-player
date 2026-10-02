@@ -1,15 +1,8 @@
 name: CI
 
-# NOTE: This repo has no test suite yet (no tests/, no pytest/unittest in
-# requirements.txt, no pyproject.toml/pytest.ini anywhere). Until real tests
-# exist, this workflow runs the most meaningful build/import check available:
-# install the pinned dependencies, byte-compile every .py file (catches
-# syntax errors), and import the Flask app object itself (catches broken
-# imports, renamed symbols, decorator typos, etc. across app.py and the
-# service modules it wires together). This is a genuine smoke check, not a
-# no-op — it fails on real breakage even without config.yaml or API keys,
-# since app.run() is guarded behind `if __name__ == "__main__":` and every
-# module with import-time side effects wraps risky work in try/except.
+# The suite covers API-safety regressions as well as the import/compile smoke
+# checks. It needs no configured YouTube API key because route tests replace
+# external calls with fakes.
 on:
   push:
   pull_request:
@@ -39,12 +32,15 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: requirements-dev.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -r requirements-dev.txt
+
+      - name: Run regression tests
+        run: python -m pytest -q
 
       - name: Byte-compile all Python sources (catches syntax errors)
         run: python -m compileall -q .

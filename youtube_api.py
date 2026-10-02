@@ -94,7 +94,9 @@ def _api_get(url, params=None, session=None):
         if params and 'key' in params:
             err_msg = err_msg.replace(params['key'], '***MASKED***')
         logger.warning("YouTube API request failed: %s — %s", url, err_msg)
-        return {"error": "REQUEST_FAILED", "message": err_msg}
+        # Keep request-library diagnostics in the server log only. They can
+        # include request URLs, credentials, or implementation details.
+        return {"error": "REQUEST_FAILED"}
 
 
 # ── Channels ────────────────────────────────────────────────────────────────
