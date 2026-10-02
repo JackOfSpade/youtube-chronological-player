@@ -119,7 +119,8 @@ def get_uploads_playlist_id(channel_id, api_key, session=None):
         params=params,
         session=session,
     )
-    if 'error' in data: return data
+    if 'error' in data:
+        return data
     items = data.get('items')
     
     # Fallback for handle if not found directly (sometimes handles change or API is finicky)
@@ -154,7 +155,8 @@ def search_channels(query, api_key, session=None):
         params={'part': 'snippet', 'type': 'channel', 'q': query, 'maxResults': 5, 'key': api_key},
         session=session,
     )
-    if 'error' in data: return data
+    if 'error' in data:
+        return data
 
     items = data.get('items')
     if not isinstance(items, list):
@@ -162,13 +164,16 @@ def search_channels(query, api_key, session=None):
 
     resolved = []
     for item in items:
-        if not isinstance(item, dict): continue
+        if not isinstance(item, dict):
+            continue
         snippet = item.get('snippet')
         res_id = item.get('id')
-        if not isinstance(snippet, dict) or not isinstance(res_id, dict): continue
+        if not isinstance(snippet, dict) or not isinstance(res_id, dict):
+            continue
         
         ch_id = res_id.get('channelId') or snippet.get('channelId')
-        if not ch_id or not isinstance(ch_id, str): continue
+        if not ch_id or not isinstance(ch_id, str):
+            continue
         
         resolved.append({
             'channelId': str(ch_id),
@@ -209,7 +214,8 @@ def fetch_videos_from_playlist(playlist_id, start_date_iso, api_key, session=Non
             params=params,
             session=session,
         )
-        if 'error' in data: return data
+        if 'error' in data:
+            return data
         items = data.get('items')
         if not items or not isinstance(items, list):
             break
@@ -275,7 +281,8 @@ def fetch_video_comments(video_id, api_key, page_token=None, session=None):
         params['pageToken'] = page_token
 
     data = _api_get("https://www.googleapis.com/youtube/v3/commentThreads", params=params, session=session)
-    if 'error' in data: return data
+    if 'error' in data:
+        return data
 
     items = data.get('items')
     if not isinstance(items, list):
@@ -283,7 +290,8 @@ def fetch_video_comments(video_id, api_key, page_token=None, session=None):
 
     comments_list = []
     for item in items:
-        if not isinstance(item, dict): continue
+        if not isinstance(item, dict):
+            continue
         top_snippet = _safe_dict_get(item, 'snippet', 'topLevelComment', 'snippet')
         comment_obj = _parse_comment(top_snippet, item.get('id') if isinstance(item.get('id'), str) else '')
         raw_comments = _safe_dict_get(item, 'replies').get('comments')
@@ -300,18 +308,23 @@ def fetch_video_comments(video_id, api_key, page_token=None, session=None):
 # ── Private helpers ─────────────────────────────────────────────────────────
 
 def _get_thumbnail_url(snippet):
-    if not snippet: return ''
+    if not snippet:
+        return ''
     thumbnails = _safe_dict_get(snippet, 'thumbnails')
     url = _safe_dict_get(thumbnails, 'medium').get('url') or _safe_dict_get(thumbnails, 'default').get('url', '')
-    if url and not isinstance(url, str): return ''
-    if url and not (url.startswith('http://') or url.startswith('https://')): return ''
+    if url and not isinstance(url, str):
+        return ''
+    if url and not (url.startswith('http://') or url.startswith('https://')):
+        return ''
     return url or ''
 
 
 def _parse_comment(snippet, comment_id):
     avatar = snippet.get('authorProfileImageUrl') or ''
-    if avatar and not isinstance(avatar, str): avatar = ''
-    if avatar and not (avatar.startswith('http://') or avatar.startswith('https://')): avatar = ''
+    if avatar and not isinstance(avatar, str):
+        avatar = ''
+    if avatar and not (avatar.startswith('http://') or avatar.startswith('https://')):
+        avatar = ''
     
     try:
         like_count = int(snippet.get('likeCount') or 0)

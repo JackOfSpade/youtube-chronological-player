@@ -14,7 +14,6 @@ import time
 import config_manager as cfg
 import youtube_api
 import ai_filter
-import storage_manager
 
 logger = logging.getLogger(__name__)
 
@@ -263,9 +262,9 @@ def _fetch_all_videos_stream_locked(force_sync=False):
                         # Don't update manager too aggressively in the loop to avoid lock contention,
                         # but we want some granularity.
                         _sync_manager.update(msg, videos_count=len(all_videos))
-                except Exception as exc:
-                    logger.exception("Channel sync failed for %s", futures.get(future, "unknown"))
-                    msg = f'Warning: A channel failed to sync completely.'
+                except Exception:
+                    logger.exception("Channel sync failed for %s", cfg.normalize_channel_name(ch))
+                    msg = 'Warning: A channel failed to sync completely.'
                     yield _sse_event({'type': 'progress', 'message': msg})
                     _sync_manager.update(msg)
     finally:
