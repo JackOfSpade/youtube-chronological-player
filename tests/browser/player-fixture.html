@@ -1,0 +1,16 @@
+<!doctype html><html><head><meta charset="utf-8"><style>.hidden { display:none }</style></head><body>
+<div id="queue-list"></div><button id="resume-btn">Resume</button><button id="prev-page-btn"></button><button id="next-page-btn"></button><span id="page-indicator"></span>
+<div id="yt-player"></div><div id="current-video-info"><h1 id="current-title"></h1><span id="current-channel"></span><span id="current-date"></span><a id="comment-on-youtube-btn"></a></div>
+<div id="comments-section"><div id="comments-container"></div></div><div id="notification-banner"></div>
+<script>
+window.played = []; window.beacons = [];
+navigator.sendBeacon = url => { window.beacons.push(url); return true; };
+window.YT = { Player: function(_id, options) { window.playerEvents = options.events; window.played.push(options.videoId); this.loadVideoById = id => window.played.push(id); } };
+</script>
+<script type="module">
+import {state, rebuildQueueIndex} from '/static/js/state.js';
+import {renderQueue, updateResumeButton} from '/static/js/queue.js';
+import {resumePlayback} from '/static/js/player.js';
+window.testApp = {state, rebuildQueueIndex, renderQueue, updateResumeButton, resumePlayback};
+document.getElementById('resume-btn').addEventListener('click', resumePlayback);
+</script></body></html>

@@ -6,6 +6,7 @@ name: CI
 on:
   push:
   pull_request:
+    branches: [main]
   workflow_dispatch:
 
 permissions:
@@ -52,3 +53,34 @@ jobs:
       # wiring failures across app.py and the service modules it imports.
       - name: Import the Flask app
         run: python -c "import app; print(app.app)"
+
+  browser:
+    name: Browser playback regression
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements-browser.txt
+      - run: python -m pip install -r requirements-browser.txt
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: ~/.cache/ms-playwright
+          key: ${{ runner.os }}-playwright-${{ hashFiles('requirements-browser.txt') }}
+      - run: python -m playwright install --with-deps chromium
+      - run: python tests/browser/check_playback.py
+
+  required:
+    name: CI required
+    if: always()
+    needs: [build-and-smoke-test, browser]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require every CI job to succeed
+        env:
+          ALL_PASSED: ${{ needs.build-and-smoke-test.result == 'success' && needs.browser.result == 'success' }}
+        run: test "$ALL_PASSED" = true
